@@ -1,0 +1,8 @@
+# This file contains the environment variables for the arbi_server service
+
+# Database
+MONGODB_HOSTNAME=192.168.3.48
+MONGODB_PORT=30000
+MONGODB_USERNAME=arbitrage
+MONGODB_PASSWORD=arbitragePass
+MONGODB_DBNAME=arbitrage
