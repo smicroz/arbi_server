@@ -6,3 +6,9 @@ MONGODB_PORT=30000
 MONGODB_USERNAME=arbitrage
 MONGODB_PASSWORD=arbitragePass
 MONGODB_DBNAME=arbitrage
+
+# log
+RUST_LOG=info
+
+# JWT
+SECRET_KEY=mysecretkey

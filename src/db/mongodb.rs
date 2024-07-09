@@ -1,7 +1,7 @@
 use mongodb::{Client as MongoClient, options::ClientOptions, Database};
 use std::env;
 
-#[derive(Clone)] // Agregar esta línea
+#[derive(Clone)]
 pub struct MongoDbContext {
     pub client: MongoClient,
     pub db_name: String,
