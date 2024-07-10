@@ -1,6 +1,7 @@
 pub mod auth_service;
 pub mod auth_controller;
 pub mod auth_model;
+pub mod auth_response;
 
 use actix_web::web;
 

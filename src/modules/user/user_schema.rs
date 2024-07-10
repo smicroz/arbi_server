@@ -9,6 +9,7 @@ pub struct User {
     pub name: String,
     pub email: String,
     pub password: String,
+    pub default_asset: Option<ObjectId>,
     pub password_reset_token: String,
     pub password_reset_expires: NaiveDateTime,
     pub tokens: Vec<String>, // Almacenar tokens activos
