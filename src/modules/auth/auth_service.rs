@@ -20,7 +20,8 @@ pub struct AuthResponse {
     pub token: String,
     pub name: String,
     pub email: String,
-    pub default_asset: Option<String>, // Enviar como String en la respuesta JSON
+    pub _default_asset: Option<String>, // Enviar como String en la respuesta JSON
+    pub _default_market_pair: Option<String>, // Enviar como String en la respuesta JSON
 }
 
 pub struct AuthService;
@@ -59,7 +60,8 @@ impl AuthService {
             token,
             name: user.name,
             email: user.email,
-            default_asset: user.default_asset.map(|id| id.to_hex()), // Convertir ObjectId a String
+            _default_asset: user._default_asset.map(|id| id.to_hex()), // Convertir ObjectId a String
+            _default_market_pair: user._default_market_pair.map(|id| id.to_hex()), // Convertir ObjectId a String
         };
 
         Ok(auth_response)
@@ -85,7 +87,8 @@ impl AuthService {
             name: name.to_string(),
             email: email.to_string(),
             password: hashed_password,
-            default_asset: None, // El campo default_asset está vacío al registrar
+            _default_asset: None, // El campo default_asset está vacío al registrar
+            _default_market_pair: None, // El campo default_market_pair está vacío al registrar
             password_reset_token: String::new(),
             password_reset_expires: chrono::Utc::now().naive_utc(),
             tokens: vec![],
@@ -113,7 +116,8 @@ impl AuthService {
             token,
             name: user.name,
             email: user.email,
-            default_asset: user.default_asset.map(|id| id.to_hex()), // Convertir ObjectId a String
+            _default_asset: user._default_asset.map(|id| id.to_hex()), // Convertir ObjectId a String
+            _default_market_pair: user._default_market_pair.map(|id| id.to_hex()), // Convertir ObjectId a String
         };
 
         info!("User registered: {}", email);

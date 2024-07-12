@@ -68,7 +68,7 @@ impl AssetService {
                 "short_name": updated_asset.short_name,
                 "updated_at": now,
                 "status": updated_asset.status,
-                "_exchange_id": updated_asset._exchange_id,
+                "_exchange": updated_asset._exchange_id,
             }
         };
 
@@ -104,6 +104,7 @@ impl AssetService {
                 e.to_string()
             })?;
 
+        
         let mut assets = Vec::new();
         while let Some(asset) = cursor.try_next().await.map_err(|e| {
             error!("Failed to iterate through assets: {}", e);
@@ -111,6 +112,8 @@ impl AssetService {
         })? {
             assets.push(asset);
         }
+
+        //println!("assets: {:?}", assets);
 
         Ok(assets)
     }
