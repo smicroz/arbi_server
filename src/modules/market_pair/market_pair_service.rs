@@ -4,8 +4,26 @@ use crate::modules::market_pair::market_pair_schema::MarketPair;
 use tracing::error;
 use chrono::Utc;
 use futures::TryStreamExt;
+use serde::{Serialize, Deserialize};
+use mongodb::bson;
+
+use crate::modules::asset::asset_schema::Asset;
+use crate::modules::exchange::exchange_schema::Exchange;
 
 pub struct MarketPairService;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PopulatedMarketPair {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub exchange: Exchange,
+    pub base_asset: Asset,
+    pub quote_asset: Asset,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub status: bool,
+}
+
 
 impl MarketPairService {
     pub async fn create_market_pair(market_pair: MarketPair, db_context: &MongoDbContext) -> Result<MarketPair, String> {
@@ -94,24 +112,67 @@ impl MarketPairService {
         Ok(())
     }
 
-    pub async fn get_all_market_pairs(db_context: &MongoDbContext) -> Result<Vec<MarketPair>, String> {
+    pub async fn get_all_market_pairs(db_context: &MongoDbContext) -> Result<Vec<PopulatedMarketPair>, String> {
         let db = db_context.get_database();
-        let collection = db.collection::<MarketPair>("market_pairs");
-
-        let mut cursor = collection.find(doc! {}).await
+        let market_pairs_collection = db.collection::<MarketPair>("market_pairs");
+    
+        let pipeline = vec![
+            doc! {
+                "$lookup": {
+                    "from": "exchanges",
+                    "localField": "_exchange",
+                    "foreignField": "_id",
+                    "as": "exchange"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_base_asset",
+                    "foreignField": "_id",
+                    "as": "base_asset"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_quote_asset",
+                    "foreignField": "_id",
+                    "as": "quote_asset"
+                }
+            },
+            doc! {
+                "$unwind": "$exchange"
+            },
+            doc! {
+                "$unwind": "$base_asset"
+            },
+            doc! {
+                "$unwind": "$quote_asset"
+            }
+        ];
+    
+        let mut cursor = market_pairs_collection.aggregate(pipeline).await
             .map_err(|e| {
-                error!("Failed to fetch all market pairs: {}", e);
+                error!("Failed to aggregate market pairs: {}", e);
                 e.to_string()
             })?;
-
-        let mut market_pairs = Vec::new();
-        while let Some(market_pair) = cursor.try_next().await.map_err(|e| {
-            error!("Failed to iterate through market pairs: {}", e);
+    
+        let mut populated_market_pairs = Vec::new();
+        while let Some(result) = cursor.try_next().await.map_err(|e| {
+            error!("Failed to iterate through aggregation results: {}", e);
             e.to_string()
         })? {
-            market_pairs.push(market_pair);
+            // Deserialize the result into PopulatedMarketPair
+            let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+                .map_err(|e| {
+                    error!("Failed to deserialize market pair: {}", e);
+                    e.to_string()
+                })?;
+    
+            populated_market_pairs.push(populated_market_pair);
         }
-
-        Ok(market_pairs)
+    
+        Ok(populated_market_pairs)
     }
 }

@@ -5,7 +5,7 @@ use crate::modules::market_pair::market_pair_schema::MarketPair;
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize};
 use crate::modules::auth::auth_response::ApiResponse;
-use tracing::{info, error};
+use tracing::{error};
 
 #[derive(Deserialize)]
 struct ObjectIdPath {

@@ -5,7 +5,7 @@ use mongodb::bson::oid::ObjectId;
 pub struct Asset {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     pub id: Option<ObjectId>,
-    pub _exchange_id: ObjectId,
+    pub _exchange: ObjectId,
     pub name: String,
     pub short_name: String,
     pub created_at: i64,

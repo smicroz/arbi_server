@@ -55,11 +55,11 @@ impl AccountService {
             }
         }
 
-        println!("{:?}", update_data._default_asset);
-        if let Some(default_asset) = update_data._default_asset {
+        println!("{:?}", update_data._default_market_pair);
+        if let Some(default_asset) = update_data._default_market_pair {
             // Convertir el default_asset de String a ObjectId
             let default_asset_id = ObjectId::parse_str(&default_asset).map_err(|e| e.to_string())?;
-            update_doc.insert("_default_asset", default_asset_id);
+            update_doc.insert("_default_market_pair", default_asset_id);
         }
 
         // Solo realiza la actualización si hay campos para actualizar

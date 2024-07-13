@@ -68,7 +68,7 @@ impl AssetService {
                 "short_name": updated_asset.short_name,
                 "updated_at": now,
                 "status": updated_asset.status,
-                "_exchange": updated_asset._exchange_id,
+                "_exchange": updated_asset._exchange,
             }
         };
 
