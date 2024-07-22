@@ -6,11 +6,21 @@ use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize};
 use crate::modules::auth::auth_response::ApiResponse;
 use tracing::{error};
+use serde_json::json;
 
 #[derive(Deserialize)]
 struct ObjectIdPath {
     id: String,
 }
+
+#[derive(Deserialize)]
+struct MarketPairQuery {
+    page: Option<u64>,
+    per_page: Option<u64>,
+    exchange_id: Option<String>,
+    search: Option<String>,
+}
+
 
 #[post("/market_pairs")]
 pub async fn create_market_pair(market_pair: web::Json<MarketPair>, db_context: web::Data<MongoDbContext>) -> impl Responder {
@@ -60,9 +70,26 @@ pub async fn delete_market_pair(path: web::Path<ObjectIdPath>, db_context: web::
 }
 
 #[get("/market_pairs")]
-pub async fn get_all_market_pairs(db_context: web::Data<MongoDbContext>) -> impl Responder {
-    match MarketPairService::get_all_market_pairs(&db_context).await {
-        Ok(market_pairs) => HttpResponse::Ok().json(ApiResponse::success("Market pairs retrieved successfully", market_pairs)),
+pub async fn get_all_market_pairs(
+    db_context: web::Data<MongoDbContext>,
+    query: web::Query<MarketPairQuery>,
+) -> impl Responder {
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(20);
+
+    match MarketPairService::get_all_market_pairs(
+        &db_context,
+        page,
+        per_page,
+        query.exchange_id.clone(),
+        query.search.clone(),
+    ).await {
+        Ok((market_pairs, total)) => HttpResponse::Ok().json(ApiResponse::success("Market pairs retrieved successfully", json!({
+            "market_pairs": market_pairs,
+            "total": total,
+            "page": page,
+            "per_page": per_page
+        }))),
         Err(err) => {
             error!("Failed to retrieve market pairs: {}", err);
             HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))

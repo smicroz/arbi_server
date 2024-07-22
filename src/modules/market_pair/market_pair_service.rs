@@ -1,5 +1,5 @@
 use crate::db::mongodb::MongoDbContext;
-use mongodb::bson::{doc, oid::ObjectId};
+use mongodb::bson::{doc, Document, oid::ObjectId, Regex};
 use crate::modules::market_pair::market_pair_schema::MarketPair;
 use tracing::error;
 use chrono::Utc;
@@ -112,11 +112,28 @@ impl MarketPairService {
         Ok(())
     }
 
-    pub async fn get_all_market_pairs(db_context: &MongoDbContext) -> Result<Vec<PopulatedMarketPair>, String> {
+    pub async fn get_all_market_pairs(
+        db_context: &MongoDbContext,
+        page: u64,
+        per_page: u64,
+        exchange_id: Option<String>,
+        search: Option<String>
+    ) -> Result<(Vec<PopulatedMarketPair>, u64), String> {
         let db = db_context.get_database();
-        let market_pairs_collection = db.collection::<MarketPair>("market_pairs");
+        let market_pairs_collection = db.collection::<Document>("market_pairs");
     
-        let pipeline = vec![
+        let skip = (page - 1) * per_page;
+    
+        let mut initial_filter = doc! {};
+    
+        if let Some(exchange) = exchange_id.filter(|s| !s.is_empty()) {
+            if let Ok(oid) = ObjectId::parse_str(&exchange) {
+                initial_filter.insert("_exchange", oid);
+            }
+        }
+    
+        let mut pipeline = vec![
+            doc! { "$match": initial_filter },
             doc! {
                 "$lookup": {
                     "from": "exchanges",
@@ -141,18 +158,27 @@ impl MarketPairService {
                     "as": "quote_asset"
                 }
             },
-            doc! {
-                "$unwind": "$exchange"
-            },
-            doc! {
-                "$unwind": "$base_asset"
-            },
-            doc! {
-                "$unwind": "$quote_asset"
-            }
+            doc! { "$unwind": "$exchange" },
+            doc! { "$unwind": "$base_asset" },
+            doc! { "$unwind": "$quote_asset" },
         ];
     
-        let mut cursor = market_pairs_collection.aggregate(pipeline).await
+        if let Some(term) = search.filter(|s| !s.is_empty()) {
+            let search_stage = doc! {
+                "$match": {
+                    "$or": [
+                        { "base_asset.short_name": Regex { pattern: format!(".*{}.*", term), options: "i".to_string() } },
+                        { "quote_asset.short_name": Regex { pattern: format!(".*{}.*", term), options: "i".to_string() } }
+                    ]
+                }
+            };
+            pipeline.push(search_stage);
+        }
+    
+        pipeline.push(doc! { "$skip": skip as i64 });
+        pipeline.push(doc! { "$limit": per_page as i64 });
+    
+        let mut cursor = market_pairs_collection.aggregate(pipeline.clone()).await
             .map_err(|e| {
                 error!("Failed to aggregate market pairs: {}", e);
                 e.to_string()
@@ -163,7 +189,6 @@ impl MarketPairService {
             error!("Failed to iterate through aggregation results: {}", e);
             e.to_string()
         })? {
-            // Deserialize the result into PopulatedMarketPair
             let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
                 .map_err(|e| {
                     error!("Failed to deserialize market pair: {}", e);
@@ -173,6 +198,24 @@ impl MarketPairService {
             populated_market_pairs.push(populated_market_pair);
         }
     
-        Ok(populated_market_pairs)
+        // Para contar el total, necesitamos quitar las etapas de paginación y agregar un $count
+        pipeline.pop(); // Quitar $limit
+        pipeline.pop(); // Quitar $skip
+        pipeline.push(doc! { "$count": "total" });
+    
+        let total = market_pairs_collection.aggregate(pipeline).await
+            .map_err(|e| {
+                error!("Failed to count market pairs: {}", e);
+                e.to_string()
+            })?
+            .try_next().await
+            .map_err(|e| {
+                error!("Failed to get count result: {}", e);
+                e.to_string()
+            })?
+            .and_then(|doc| doc.get_i64("total").ok())
+            .unwrap_or(0) as u64;
+    
+        Ok((populated_market_pairs, total))
     }
 }

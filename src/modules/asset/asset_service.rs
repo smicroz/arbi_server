@@ -1,10 +1,9 @@
 use crate::db::mongodb::MongoDbContext;
-use mongodb::bson::{doc, oid::ObjectId};
+use mongodb::bson::{doc, Document, oid::ObjectId, Regex};  // Añade Document aquí
 use crate::modules::asset::asset_schema::Asset;
-use tracing::error; // Mantenemos la importación de error
+use tracing::error;
 use chrono::Utc;
 use futures::TryStreamExt;
-
 pub struct AssetService;
 
 impl AssetService {
@@ -94,17 +93,58 @@ impl AssetService {
         Ok(())
     }
 
-    pub async fn get_all_assets(db_context: &MongoDbContext) -> Result<Vec<Asset>, String> {
+    pub async fn get_all_assets(
+        db_context: &MongoDbContext,
+        page: u64,
+        per_page: u64,
+        include_exchange: bool,
+        search: Option<String>
+    ) -> Result<(Vec<Document>, u64), String> {
         let db = db_context.get_database();
-        let collection = db.collection::<Asset>("assets");
+        let collection = db.collection::<Document>("assets");
 
-        let mut cursor = collection.find(doc! {}).await
+        let skip = (page - 1) * per_page;
+        
+        // Construir el filtro basado en el término de búsqueda
+        let filter = match search {
+            Some(term) => doc! {
+                "$or": [
+                    { "name": Regex { pattern: format!(".*{}.*", term), options: "i".to_string() } },
+                    { "short_name": Regex { pattern: format!(".*{}.*", term), options: "i".to_string() } }
+                ]
+            },
+            None => doc! {},
+        };
+
+        let mut pipeline = vec![
+            doc! { "$match": filter.clone() },
+            doc! { "$skip": skip as i64 },
+            doc! { "$limit": per_page as i64 },
+        ];
+
+        if include_exchange {
+            pipeline.push(doc! {
+                "$lookup": {
+                    "from": "exchanges",
+                    "localField": "_exchange",
+                    "foreignField": "_id",
+                    "as": "exchange"
+                }
+            });
+            pipeline.push(doc! {
+                "$unwind": {
+                    "path": "$exchange",
+                    "preserveNullAndEmptyArrays": true
+                }
+            });
+        }
+
+        let mut cursor = collection.aggregate(pipeline).await
             .map_err(|e| {
-                error!("Failed to fetch all assets: {}", e);
+                error!("Failed to fetch assets: {}", e);
                 e.to_string()
             })?;
 
-        
         let mut assets = Vec::new();
         while let Some(asset) = cursor.try_next().await.map_err(|e| {
             error!("Failed to iterate through assets: {}", e);
@@ -113,8 +153,12 @@ impl AssetService {
             assets.push(asset);
         }
 
-        //println!("assets: {:?}", assets);
+        let total = collection.count_documents(filter).await
+            .map_err(|e| {
+                error!("Failed to count assets: {}", e);
+                e.to_string()
+            })?;
 
-        Ok(assets)
+        Ok((assets, total))
     }
 }
