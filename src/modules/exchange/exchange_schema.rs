@@ -8,6 +8,6 @@ pub struct Exchange {
     pub name: String,
     pub short_name: String,
     pub url: String,
-    pub created_at: i64,
-    pub updated_at: i64,
+    pub created_at: f64,
+    pub updated_at: f64,
 }

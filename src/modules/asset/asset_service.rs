@@ -11,7 +11,7 @@ impl AssetService {
         let db = db_context.get_database();
         let collection = db.collection::<Asset>("assets");
 
-        let now = Utc::now().timestamp();
+        let now = Utc::now().timestamp() as f64;
         let new_asset = Asset {
             created_at: now,
             updated_at: now,
@@ -60,7 +60,7 @@ impl AssetService {
         let db = db_context.get_database();
         let collection = db.collection::<Asset>("assets");
 
-        let now = Utc::now().timestamp();
+        let now = Utc::now().timestamp() as f64;
         let update_doc = doc! {
             "$set": {
                 "name": updated_asset.name,

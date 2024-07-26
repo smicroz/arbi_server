@@ -27,7 +27,7 @@ pub async fn create_market_pair(market_pair: web::Json<MarketPair>, db_context: 
     match MarketPairService::create_market_pair(market_pair.into_inner(), &db_context).await {
         Ok(market_pair) => HttpResponse::Ok().json(ApiResponse::success("Market pair created successfully", market_pair)),
         Err(err) => {
-            error!("Failed to create market pair: {}", err);
+            error!("Failed to create market pair in : {}", err);
             HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
         },
     }
@@ -91,7 +91,7 @@ pub async fn get_all_market_pairs(
             "per_page": per_page
         }))),
         Err(err) => {
-            error!("Failed to retrieve market pairs: {}", err);
+            error!("Failed to retrieve market pairs in GET /market_pairs: {}", err);
             HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
         },
     }

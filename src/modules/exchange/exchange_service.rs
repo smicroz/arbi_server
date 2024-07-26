@@ -12,7 +12,7 @@ impl ExchangeService {
         let db = db_context.get_database();
         let collection = db.collection::<Exchange>("exchanges");
 
-        let now = Utc::now().timestamp();
+        let now = Utc::now().timestamp() as f64;
         let new_exchange = Exchange {
             created_at: now,
             updated_at: now,
@@ -61,7 +61,7 @@ impl ExchangeService {
         let db = db_context.get_database();
         let collection = db.collection::<Exchange>("exchanges");
 
-        let now = Utc::now().timestamp();
+        let now = Utc::now().timestamp() as f64;
         let update_doc = doc! {
             "$set": {
                 "name": updated_exchange.name,

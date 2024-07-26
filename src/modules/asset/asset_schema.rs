@@ -8,7 +8,7 @@ pub struct Asset {
     pub _exchange: ObjectId,
     pub name: String,
     pub short_name: String,
-    pub created_at: i64,
-    pub updated_at: i64,
+    pub created_at: f64,
+    pub updated_at: f64,
     pub status: bool,
 }

@@ -8,7 +8,7 @@ pub struct MarketPair {
     pub _exchange: ObjectId,
     pub _base_asset: ObjectId,
     pub _quote_asset: ObjectId,
-    pub created_at: i64,
-    pub updated_at: i64,
+    pub created_at: f64,
+    pub updated_at: f64,
     pub status: bool,
 }
