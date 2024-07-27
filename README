@@ -1,0 +1,50 @@
+Arbitraje triangular
+
+Exchange X:
+ETH/USDT = 1850
+BTC/USDT = 30000
+ETH/BTC = 0.0616
+Proceso:
+
+Empezar con 1850 USDT
+Comprar ETH con USDT: 1850 / 1850 = 1 ETH
+Cambiar ETH por BTC: 1 / 0.0616 = 16.2338 BTC
+Vender BTC por USDT: 16.2338 * 30000 = 1870.14 USDT
+
+Cálculo:
+Beneficio = (USDT final - USDT inicial) / USDT inicial * 100
+(1870.14 - 1850) / 1850 * 100 = 1.09%
+Resultado: Existe una oportunidad de arbitraje triangular del 1.09%.
+
+Arbitraje estadístico
+
+Datos históricos del par ETH/BTC durante los últimos 30 días:
+Media = 0.06
+Desviación estándar = 0.002
+Situación actual:
+ETH/BTC = 0.0565
+Cálculo:
+Z-score = (Valor actual - Media) / Desviación estándar
+Z-score = (0.0565 - 0.06) / 0.002 = -1.75
+Estrategia: Si el Z-score es menor que -2 o mayor que 2, se considera una oportunidad de arbitraje estadístico.
+Resultado: Con un Z-score de -1.75, estamos cerca de una oportunidad de arbitraje. La estrategia sería comprar ETH y vender BTC, esperando que el ratio vuelva a la media.
+
+Arbitraje entre pares de trading
+
+Exchange Y:
+LTC/BTC = 0.004
+ETH/BTC = 0.06
+LTC/ETH = 0.068
+Cálculo:
+Valor teórico de LTC/ETH = LTC/BTC ÷ ETH/BTC
+0.004 / 0.06 = 0.0667
+Discrepancia = (Valor real - Valor teórico) / Valor teórico * 100
+(0.068 - 0.0667) / 0.0667 * 100 = 1.95%
+Resultado: Existe una discrepancia del 1.95% entre el valor real y el valor teórico de LTC/ETH.
+Estrategia:
+
+Vender LTC por ETH al precio actual de 0.068
+Comprar BTC con ETH: 1 / 0.06 = 16.67 BTC por cada ETH
+Comprar LTC con BTC: 16.67 * 0.004 = 0.0667 LTC
+
+Ganancia potencial: 0.068 - 0.0667 = 0.0013 LTC por cada LTC inicial (aproximadamente 1.95% de ganancia).
