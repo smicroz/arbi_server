@@ -9,13 +9,16 @@ pub enum ArbitrageType {
     TradingPair,
 }
 
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ArbitrageStrategy {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     pub id: Option<ObjectId>,
     pub arbitrage_type: ArbitrageType,
     pub details: ArbitrageDetails,
+    #[serde(default)]
     pub created_at: f64,
+    #[serde(default)]
     pub updated_at: f64,
     pub status: bool,
 }

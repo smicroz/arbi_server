@@ -10,7 +10,7 @@ use serde_json::json;
 
 #[derive(Deserialize)]
 struct ObjectIdPath {
-    id: String,
+    pub id: String,
 }
 
 #[derive(Deserialize)]
@@ -23,17 +23,16 @@ struct MarketPairQuery {
 
 #[get("/market_pairs/by_exchange/{exchange_id}")]
 pub async fn get_market_pairs_by_exchange(
-    path: web::Path<ObjectIdPath>,
+    exchange_id: web::Path<String>,
     db_context: web::Data<MongoDbContext>
 ) -> impl Responder {
-    println!("get_market_pairs_by_exchange");
-    match ObjectId::parse_str(&path.id) {
-        Ok(exchange_id) => {
-            match MarketPairService::get_all_market_pairs_by_exchange(&db_context, exchange_id).await {
+    match ObjectId::parse_str(&*exchange_id) {
+        Ok(oid) => {
+            match MarketPairService::get_all_market_pairs_by_exchange(&db_context, oid).await {
                 Ok(market_pairs) => HttpResponse::Ok().json(ApiResponse::success("Market pairs retrieved successfully", market_pairs)),
                 Err(err) => {
                     error!("Failed to retrieve market pairs by exchange: {}", err);
-                    HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+                    HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err.to_string()))
                 },
             }
         },

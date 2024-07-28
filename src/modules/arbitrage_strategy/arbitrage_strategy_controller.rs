@@ -20,13 +20,35 @@ struct ArbitrageStrategyQuery {
     arbitrage_type: Option<ArbitrageType>,
 }
 
+// #[post("/arbitrage-strategies")]
+// pub async fn create_arbitrage_strategy(strategy: web::Json<ArbitrageStrategy>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+//     println!("Creating arbitrage strategy");
+//     match ArbitrageStrategyService::create_arbitrage_strategy(strategy.into_inner(), &db_context).await {
+//         Ok(strategy) => HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy created successfully", strategy)),
+//         Err(err) => {
+//             error!("Failed to create arbitrage strategy: {}", err);
+//             HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+//         },
+//     }
+// }
+
 #[post("/arbitrage-strategies")]
-pub async fn create_arbitrage_strategy(strategy: web::Json<ArbitrageStrategy>, db_context: web::Data<MongoDbContext>) -> impl Responder {
-    match ArbitrageStrategyService::create_arbitrage_strategy(strategy.into_inner(), &db_context).await {
-        Ok(strategy) => HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy created successfully", strategy)),
+pub async fn create_arbitrage_strategy(
+    strategy: web::Json<ArbitrageStrategy>,
+    db_context: web::Data<MongoDbContext>
+) -> impl Responder {
+    println!("Received data: {:?}", strategy);
+
+    let parsed_strategy = strategy.into_inner();
+    
+    match ArbitrageStrategyService::create_arbitrage_strategy(parsed_strategy, &db_context).await {
+        Ok(created_strategy) => {
+            println!("Strategy created successfully: {:?}", created_strategy);
+            HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy created successfully", created_strategy))
+        },
         Err(err) => {
             error!("Failed to create arbitrage strategy: {}", err);
-            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&format!("Failed to create strategy: {}", err)))
         },
     }
 }

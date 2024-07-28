@@ -1,6 +1,6 @@
 use crate::db::mongodb::MongoDbContext;
 use mongodb::bson::{doc, oid::ObjectId};
-use crate::modules::arbitrage_strategy::arbitrage_strategy_schema::{ArbitrageStrategy, ArbitrageType};
+use crate::modules::arbitrage_strategy::arbitrage_strategy_schema::{ArbitrageStrategy, ArbitrageType, ArbitrageDetails};
 use tracing::error;
 use chrono::Utc;
 use futures::TryStreamExt;
@@ -9,18 +9,22 @@ use mongodb::bson;
 pub struct ArbitrageStrategyService;
 
 impl ArbitrageStrategyService {
-    pub async fn create_arbitrage_strategy(strategy: ArbitrageStrategy, db_context: &MongoDbContext) -> Result<ArbitrageStrategy, String> {
+    pub async fn create_arbitrage_strategy(mut strategy: ArbitrageStrategy, db_context: &MongoDbContext) -> Result<ArbitrageStrategy, String> {
         let db = db_context.get_database();
         let collection = db.collection::<ArbitrageStrategy>("arbitrage_strategies");
-
+    
         let now = Utc::now().timestamp() as f64;
-        let new_strategy = ArbitrageStrategy {
-            created_at: now,
-            updated_at: now,
-            ..strategy
-        };
-
-        let insert_result = collection.insert_one(new_strategy.clone()).await
+        strategy.created_at = now;
+        strategy.updated_at = now;
+    
+        // Convertir strings a ObjectId si es necesario
+        if let ArbitrageDetails::Geographic(ref mut geo) = strategy.details {
+            geo.pair1 = ObjectId::parse_str(&geo.pair1.to_string()).map_err(|e| e.to_string())?;
+            geo.pair2 = ObjectId::parse_str(&geo.pair2.to_string()).map_err(|e| e.to_string())?;
+            geo.conversion_pair = ObjectId::parse_str(&geo.conversion_pair.to_string()).map_err(|e| e.to_string())?;
+        }
+    
+        let insert_result = collection.insert_one(strategy.clone()).await
             .map_err(|e| {
                 error!("Failed to insert arbitrage strategy: {}", e);
                 e.to_string()
