@@ -1289,16 +1289,650 @@ const useFetchMarketPair = (initialPage = 1, initialPerPage = 20) => {
 
 export default useFetchMarketPair;
 
-Pero ahora necesito configurar el ArbitrageStrategyListPage, para mostrar la lista de elemento y mostrar los cuatro botones para crear los 4 tipos de arbitrage, que eso lo haré en otra paginas de react
+esta es la arbitragestartegypagelist
 
-import React from 'react'
+import React, { useState } from 'react';
+import { Table, Button, Spin, Alert, Modal } from 'antd';
+import { PlusOutlined } from '@ant-design/icons';
+import useFetchArbitrageStrategies from '../hooks/useFetchArbitrageStrategies';
+import { Link } from 'react-router-dom';
 
 export const ArbitrageStrategyListPage = () => {
+  const { strategies, loading, error, pagination, fetchStrategies } = useFetchArbitrageStrategies();
+  const [isModalVisible, setIsModalVisible] = useState(false);
+
+  const handleTableChange = (newPagination, filters, sorter) => {
+    fetchStrategies(newPagination.current, newPagination.pageSize);
+  };
+
+  const showModal = () => {
+    setIsModalVisible(true);
+  };
+
+  const handleCancel = () => {
+    setIsModalVisible(false);
+  };
+
+  const columns = [
+    {
+      title: 'Tipo de Arbitraje',
+      dataIndex: 'arbitrage_type',
+      key: 'arbitrage_type',
+    },
+    {
+      title: 'Estado',
+      dataIndex: 'status',
+      key: 'status',
+      render: (status) => (status ? 'Activo' : 'Inactivo'),
+    },
+    {
+      title: 'Fecha de Creación',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      render: (date) => new Date(date * 1000).toLocaleString(),
+    },
+    {
+      title: 'Acciones',
+      key: 'actions',
+      render: (text, record) => (
+        <Link to={`/arbitrage-strategies/${record._id.$oid}`}>Ver Detalles</Link>
+      ),
+    },
+  ];
+
   return (
     <div>
-      <h1>Lista de Estrategias de Arbitrage</h1>
+      <h1>Lista de Estrategias de Arbitraje</h1>
+      <Button type="primary" onClick={showModal} icon={<PlusOutlined />} style={{ marginBottom: 16 }}>
+        Crear Nueva Estrategia
+      </Button>
+      {error && <Alert message="Error" description={error.message} type="error" style={{ marginBottom: 16 }} />}
+      <Spin spinning={loading}>
+        <Table
+          dataSource={strategies}
+          columns={columns}
+          rowKey={record => record._id.$oid}
+          pagination={{
+            ...pagination,
+            showSizeChanger: true,
+            showQuickJumper: true,
+            showTotal: (total, range) => `${range[0]}-${range[1]} de ${total} items`,
+          }}
+          onChange={handleTableChange}
+        />
+      </Spin>
+      <Modal
+        title="Crear Nueva Estrategia de Arbitraje"
+        open={isModalVisible}
+        onCancel={handleCancel}
+        footer={null}
+      >
+        <Link to="/arbitrage-strategies/create/geographic">
+          <Button type="primary" block style={{ marginBottom: 8 }}>Arbitraje Geográfico</Button>
+        </Link>
+        <Link to="/arbitrage-strategies/create/exchange">
+          <Button type="primary" block style={{ marginBottom: 8 }}>Arbitraje de Intercambio</Button>
+        </Link>
+        <Link to="/arbitrage-strategies/create/triangular">
+          <Button type="primary" block style={{ marginBottom: 8 }}>Arbitraje Triangular</Button>
+        </Link>
+        <Link to="/arbitrage-strategies/create/trading-pair">
+          <Button type="primary" block>Arbitraje de Pares de Trading</Button>
+        </Link>
+      </Modal>
     </div>
-  )
-}
+  );
+};
 
 export default ArbitrageStrategyListPage;
+
+y su hook
+
+import { useState, useEffect, useCallback } from 'react';
+import axios from 'axios';
+
+const apiPrefix = import.meta.env.VITE_API_PREFIX;
+const serverUrl = import.meta.env.VITE_SERVER_URL;
+
+if (!apiPrefix && import.meta.env.MODE === 'development') {
+  throw new Error('VITE_API_PREFIX no está definido en modo de desarrollo.');
+}
+
+if (!serverUrl && import.meta.env.MODE === 'production') {
+  throw new Error('VITE_SERVER_URL no está definido en modo de producción.');
+}
+
+const API_URL = import.meta.env.MODE === 'development' ? apiPrefix : serverUrl;
+
+const useFetchArbitrageStrategies = (initialPage = 1, initialPerPage = 20) => {
+    const [strategies, setStrategies] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [pagination, setPagination] = useState({
+        current: initialPage,
+        pageSize: initialPerPage,
+        total: 0,
+    });
+
+    const fetchStrategies = useCallback(async (
+        page = pagination.current,
+        perPage = pagination.pageSize,
+        arbitrageType = null
+    ) => {
+        setLoading(true);
+        try {
+            const { data } = await axios.get(`${API_URL}/arbitrage-strategies`, {
+                params: {
+                    page,
+                    per_page: perPage,
+                    arbitrage_type: arbitrageType,
+                },
+            });
+            setStrategies(data.data.strategies);
+            setPagination({
+                current: page,
+                pageSize: perPage,
+                total: data.data.total,
+            });
+            setError(null);
+        } catch (error) {
+            console.error('Error al cargar las estrategias de arbitraje', error);
+            setError(error);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        fetchStrategies();
+    }, [fetchStrategies]);
+
+    return { strategies, loading, error, pagination, fetchStrategies };
+};
+
+export default useFetchArbitrageStrategies;
+
+tambien tengo el componente 
+
+import React, { useState } from 'react';
+import { Select, Button } from 'antd';
+import GeographicArbitrageForm from './GeographicArbitrageForm';
+import ExchangeArbitrageForm from './ExchangeArbitrageForm';
+import TriangularArbitrageForm from './TriangularArbitrageForm';
+import TradingPairArbitrageForm from './TradingPairArbitrageForm';
+import { useLocation } from 'react-router-dom';
+
+const { Option } = Select;
+
+const CreateArbitrageStrategyPage = () => {
+    const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  const type = params.get('type');
+  
+
+  const renderForm = () => {
+    switch(type) {
+      case 'geographic':
+        return <GeographicArbitrageForm />;
+      case 'exchange':
+        return <ExchangeArbitrageForm />;
+      case 'triangular':
+        return <TriangularArbitrageForm />;
+      case 'trading-pair':
+        return <TradingPairArbitrageForm />;
+      default:
+        return <p>Tipo de arbitraje no válido</p>;
+    }
+  };
+
+  return (
+    <div>
+      <h1>Crear Nueva Estrategia de Arbitraje</h1>
+      {renderForm()}
+    </div>
+  );
+};
+
+export default CreateArbitrageStrategyPage;
+
+y sus respectivos componentes para crear cada tipo de arbitrage
+
+import React, { useState } from 'react';
+import { Form, Select, Button, message } from 'antd';
+import useFetchMarketPair from '../../marketPair/hooks/useFetchMarketPair';
+import useFetchExchanges from '../../exchange/hooks/useFetchExchanges';
+import axios from 'axios';
+
+const { Option } = Select;
+
+const ExchangeArbitrageForm = () => {
+  const [form] = Form.useForm();
+  const { marketPairs, loading: loadingMarketPairs } = useFetchMarketPair();
+  const { exchanges, loading: loadingExchanges } = useFetchExchanges();
+  const [selectedExchange1, setSelectedExchange1] = useState(null);
+  const [selectedExchange2, setSelectedExchange2] = useState(null);
+
+  const filteredMarketPairs1 = marketPairs.filter(pair => pair.exchange._id.$oid === selectedExchange1);
+  const filteredMarketPairs2 = marketPairs.filter(pair => pair.exchange._id.$oid === selectedExchange2);
+
+  const onFinish = async (values) => {
+    try {
+      const response = await axios.post('/api/arbitrage-strategies', {
+        arbitrage_type: 'Exchange',
+        details: {
+          pair1: values.pair1,
+          pair2: values.pair2
+        },
+        status: true
+      });
+      message.success('Estrategia de arbitraje de intercambio creada con éxito');
+      form.resetFields();
+    } catch (error) {
+      message.error('Error al crear la estrategia de arbitraje');
+    }
+  };
+
+  return (
+    <Form form={form} onFinish={onFinish} layout="vertical">
+      <Form.Item name="exchange1" label="Exchange 1" rules={[{ required: true }]}>
+        <Select
+          loading={loadingExchanges}
+          onChange={(value) => setSelectedExchange1(value)}
+        >
+          {exchanges.map((exchange) => (
+            <Option key={exchange._id.$oid} value={exchange._id.$oid}>
+              {exchange.name}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair1" label="Par en Exchange 1" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs1.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="exchange2" label="Exchange 2" rules={[{ required: true }]}>
+        <Select
+          loading={loadingExchanges}
+          onChange={(value) => setSelectedExchange2(value)}
+        >
+          {exchanges.map((exchange) => (
+            <Option key={exchange._id.$oid} value={exchange._id.$oid}>
+              {exchange.name}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair2" label="Par en Exchange 2" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs2.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item>
+        <Button type="primary" htmlType="submit">
+          Crear Estrategia de Arbitraje de Intercambio
+        </Button>
+      </Form.Item>
+    </Form>
+  );
+};
+
+export default ExchangeArbitrageForm;
+
+import React, { useState } from 'react';
+import { Form, Select, Button, message } from 'antd';
+import useFetchMarketPair from '../../marketPair/hooks/useFetchMarketPair';
+import useFetchExchanges from '../../exchange/hooks/useFetchExchanges';
+import axios from 'axios';
+
+const { Option } = Select;
+
+const GeographicArbitrageForm = () => {
+  const [form] = Form.useForm();
+  const { marketPairs, loading: loadingMarketPairs } = useFetchMarketPair();
+  const { exchanges, loading: loadingExchanges } = useFetchExchanges();
+  const [selectedExchange1, setSelectedExchange1] = useState(null);
+  const [selectedExchange2, setSelectedExchange2] = useState(null);
+
+  const filteredMarketPairs1 = marketPairs.filter(pair => pair.exchange._id.$oid === selectedExchange1);
+  const filteredMarketPairs2 = marketPairs.filter(pair => pair.exchange._id.$oid === selectedExchange2);
+
+  const onFinish = async (values) => {
+    try {
+      const response = await axios.post('/api/arbitrage-strategies', {
+        arbitrage_type: 'Geographic',
+        details: {
+          pair1: values.pair1,
+          pair2: values.pair2,
+          conversion_pair: values.conversion_pair
+        },
+        status: true
+      });
+      message.success('Estrategia de arbitraje geográfico creada con éxito');
+      form.resetFields();
+    } catch (error) {
+      message.error('Error al crear la estrategia de arbitraje');
+    }
+  };
+
+  return (
+    <Form form={form} onFinish={onFinish} layout="vertical">
+      <Form.Item name="exchange1" label="Exchange 1" rules={[{ required: true }]}>
+        <Select
+          loading={loadingExchanges}
+          onChange={(value) => setSelectedExchange1(value)}
+        >
+          {exchanges.map((exchange) => (
+            <Option key={exchange._id.$oid} value={exchange._id.$oid}>
+              {exchange.name}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair1" label="Par 1" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs1.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="exchange2" label="Exchange 2" rules={[{ required: true }]}>
+        <Select
+          loading={loadingExchanges}
+          onChange={(value) => setSelectedExchange2(value)}
+        >
+          {exchanges.map((exchange) => (
+            <Option key={exchange._id.$oid} value={exchange._id.$oid}>
+              {exchange.name}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair2" label="Par 2" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs2.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="conversion_pair" label="Par de Conversión" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {marketPairs.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item>
+        <Button type="primary" htmlType="submit">
+          Crear Estrategia de Arbitraje Geográfico
+        </Button>
+      </Form.Item>
+    </Form>
+  );
+};
+
+export default GeographicArbitrageForm;
+
+
+import React, { useState } from 'react';
+import { Form, Select, Button, message } from 'antd';
+import useFetchMarketPair from '../../marketPair/hooks/useFetchMarketPair';
+import useFetchExchanges from '../../exchange/hooks/useFetchExchanges';
+import axios from 'axios';
+
+const { Option } = Select;
+
+const TradingPairArbitrageForm = () => {
+  const [form] = Form.useForm();
+  const { marketPairs, loading: loadingMarketPairs } = useFetchMarketPair();
+  const { exchanges, loading: loadingExchanges } = useFetchExchanges();
+  const [selectedExchange, setSelectedExchange] = useState(null);
+
+  const filteredMarketPairs = marketPairs.filter(pair => pair.exchange._id.$oid === selectedExchange);
+
+  const onFinish = async (values) => {
+    try {
+      const response = await axios.post('/api/arbitrage-strategies', {
+        arbitrage_type: 'TradingPair',
+        details: {
+          pair1: values.pair1,
+          pair2: values.pair2,
+          pair3: values.pair3
+        },
+        status: true
+      });
+      message.success('Estrategia de arbitraje de pares de trading creada con éxito');
+      form.resetFields();
+    } catch (error) {
+      message.error('Error al crear la estrategia de arbitraje');
+    }
+  };
+
+  return (
+    <Form form={form} onFinish={onFinish} layout="vertical">
+      <Form.Item name="exchange" label="Exchange" rules={[{ required: true }]}>
+        <Select
+          loading={loadingExchanges}
+          onChange={(value) => setSelectedExchange(value)}
+        >
+          {exchanges.map((exchange) => (
+            <Option key={exchange._id.$oid} value={exchange._id.$oid}>
+              {exchange.name}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair1" label="Par 1" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair2" label="Par 2" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair3" label="Par 3" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item>
+        <Button type="primary" htmlType="submit">
+          Crear Estrategia de Arbitraje de Pares de Trading
+        </Button>
+      </Form.Item>
+    </Form>
+  );
+};
+
+export default TradingPairArbitrageForm;
+
+import React, { useState } from 'react';
+import { Form, Select, Button, message } from 'antd';
+import useFetchMarketPair from '../../marketPair/hooks/useFetchMarketPair';
+import useFetchExchanges from '../../exchange/hooks/useFetchExchanges';
+import axios from 'axios';
+
+const { Option } = Select;
+
+const TriangularArbitrageForm = () => {
+  const [form] = Form.useForm();
+  const { marketPairs, loading: loadingMarketPairs } = useFetchMarketPair();
+  const { exchanges, loading: loadingExchanges } = useFetchExchanges();
+  const [selectedExchange, setSelectedExchange] = useState(null);
+
+  const filteredMarketPairs = marketPairs.filter(pair => pair.exchange._id.$oid === selectedExchange);
+
+  const onFinish = async (values) => {
+    try {
+      const response = await axios.post('/api/arbitrage-strategies', {
+        arbitrage_type: 'Triangular',
+        details: {
+          pair1: values.pair1,
+          pair2: values.pair2,
+          pair3: values.pair3
+        },
+        status: true
+      });
+      message.success('Estrategia de arbitraje triangular creada con éxito');
+      form.resetFields();
+    } catch (error) {
+      message.error('Error al crear la estrategia de arbitraje');
+    }
+  };
+
+  return (
+    <Form form={form} onFinish={onFinish} layout="vertical">
+      <Form.Item name="exchange" label="Exchange" rules={[{ required: true }]}>
+        <Select
+          loading={loadingExchanges}
+          onChange={(value) => setSelectedExchange(value)}
+        >
+          {exchanges.map((exchange) => (
+            <Option key={exchange._id.$oid} value={exchange._id.$oid}>
+              {exchange.name}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair1" label="Par 1" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair2" label="Par 2" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item name="pair3" label="Par 3" rules={[{ required: true }]}>
+        <Select loading={loadingMarketPairs}>
+          {filteredMarketPairs.map((pair) => (
+            <Option key={pair._id.$oid} value={pair._id.$oid}>
+              {`${pair.base_asset.short_name}/${pair.quote_asset.short_name}`}
+            </Option>
+          ))}
+        </Select>
+      </Form.Item>
+
+      <Form.Item>
+        <Button type="primary" htmlType="submit">
+          Crear Estrategia de Arbitraje Triangular
+        </Button>
+      </Form.Item>
+    </Form>
+  );
+};
+
+export default TriangularArbitrageForm;
+
+y el hook
+
+import { useState, useEffect, useCallback } from 'react';
+import axios from 'axios';
+import { message } from 'antd';
+
+const apiPrefix = import.meta.env.VITE_API_PREFIX;
+const serverUrl = import.meta.env.VITE_SERVER_URL;
+
+if (!apiPrefix && import.meta.env.MODE === 'development') {
+  throw new Error('VITE_API_PREFIX no está definido en modo de desarrollo.');
+}
+
+if (!serverUrl && import.meta.env.MODE === 'production') {
+  throw new Error('VITE_SERVER_URL no está definido en modo de producción.');
+}
+
+const API_URL = import.meta.env.MODE === 'development' ? apiPrefix : serverUrl;
+
+const useFetchMarketPairByExchange = (exchangeId) => {
+    const [marketPairs, setMarketPairs] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+
+    const fetchMarketPairs = useCallback(async () => {
+        if (!exchangeId) {
+            setError('Exchange ID is required');
+            setLoading(false);
+            return;
+        }
+
+        setLoading(true);
+        try {
+            const { data } = await axios.get(`${API_URL}/market_pairs/by_exchange/${exchangeId}`);
+            setMarketPairs(data.data);
+            setError(null);
+        } catch (error) {
+            console.error('Error al cargar los market pairs por exchange', error);
+            setError(error.response?.data?.message || 'Error al cargar los market pairs');
+            message.error('Error al cargar los market pairs');
+        } finally {
+            setLoading(false);
+        }
+    }, [exchangeId]);
+
+    useEffect(() => {
+        fetchMarketPairs();
+    }, [fetchMarketPairs]);
+
+    const refetch = useCallback(() => {
+        fetchMarketPairs();
+    }, [fetchMarketPairs]);
+
+    return { marketPairs, loading, error, refetch };
+};
+
+export default useFetchMarketPairByExchange;
+
+Necesito que en vez de cargar el useFetchMarketPair, uses el useFetchMarketPairByExchange, y que cuando el usuario seleccione, por ejemplo en arbitrage geografico seleccione el exchange 1, el sistema cargue en par 1, los marketpairs del exchange 1, adicionalmente a estos select debes agregarle un buscador porque pueden ser muchos marketpairs o exchanges.

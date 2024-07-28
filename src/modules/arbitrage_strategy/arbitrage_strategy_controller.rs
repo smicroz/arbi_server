@@ -74,8 +74,7 @@ pub async fn get_all_arbitrage_strategies(
 ) -> impl Responder {
     let page = query.page.unwrap_or(1);
     let per_page = query.per_page.unwrap_or(20);
-
-    println!("message");
+    
     match ArbitrageStrategyService::get_all_arbitrage_strategies(
         &db_context,
         page,

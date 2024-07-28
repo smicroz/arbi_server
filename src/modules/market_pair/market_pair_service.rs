@@ -112,7 +112,7 @@ impl MarketPairService {
         Ok(())
     }
 
-    pub async fn get_all_market_pairs(
+    pub async fn get_all_market_pairs_with_pagination(
         db_context: &MongoDbContext,
         page: u64,
         per_page: u64,
@@ -217,5 +217,69 @@ impl MarketPairService {
             .unwrap_or(0) as u64;
     
         Ok((populated_market_pairs, total))
+    }
+    pub async fn get_all_market_pairs_by_exchange(
+        db_context: &MongoDbContext,
+        exchange_id: ObjectId
+    ) -> Result<Vec<PopulatedMarketPair>, String> {
+        let db = db_context.get_database();
+        let market_pairs_collection = db.collection::<Document>("marketpairs");
+    
+        let pipeline = vec![
+            doc! { 
+                "$match": { 
+                    "_exchange": exchange_id 
+                } 
+            },
+            doc! {
+                "$lookup": {
+                    "from": "exchanges",
+                    "localField": "_exchange",
+                    "foreignField": "_id",
+                    "as": "exchange"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_base_asset",
+                    "foreignField": "_id",
+                    "as": "base_asset"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_quote_asset",
+                    "foreignField": "_id",
+                    "as": "quote_asset"
+                }
+            },
+            doc! { "$unwind": "$exchange" },
+            doc! { "$unwind": "$base_asset" },
+            doc! { "$unwind": "$quote_asset" },
+        ];
+    
+        let mut cursor = market_pairs_collection.aggregate(pipeline).await
+            .map_err(|e| {
+                error!("Failed to aggregate market pairs: {}", e);
+                e.to_string()
+            })?;
+    
+        let mut populated_market_pairs = Vec::new();
+        while let Some(result) = cursor.try_next().await.map_err(|e| {
+            error!("Failed to iterate through aggregation results: {}", e);
+            e.to_string()
+        })? {
+            let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+                .map_err(|e| {
+                    error!("Failed to deserialize market pair: {}", e);
+                    e.to_string()
+                })?;
+    
+            populated_market_pairs.push(populated_market_pair);
+        }
+    
+        Ok(populated_market_pairs)
     }
 }

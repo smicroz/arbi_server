@@ -21,6 +21,56 @@ struct MarketPairQuery {
     search: Option<String>,
 }
 
+#[get("/market_pairs/by_exchange/{exchange_id}")]
+pub async fn get_market_pairs_by_exchange(
+    path: web::Path<ObjectIdPath>,
+    db_context: web::Data<MongoDbContext>
+) -> impl Responder {
+    println!("get_market_pairs_by_exchange");
+    match ObjectId::parse_str(&path.id) {
+        Ok(exchange_id) => {
+            match MarketPairService::get_all_market_pairs_by_exchange(&db_context, exchange_id).await {
+                Ok(market_pairs) => HttpResponse::Ok().json(ApiResponse::success("Market pairs retrieved successfully", market_pairs)),
+                Err(err) => {
+                    error!("Failed to retrieve market pairs by exchange: {}", err);
+                    HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+                },
+            }
+        },
+        Err(_) => {
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error("Invalid exchange ID"))
+        }
+    }
+}
+
+#[get("/market_pairs/with_pagination")]
+pub async fn get_all_market_pairs_with_pagination(
+    db_context: web::Data<MongoDbContext>,
+    query: web::Query<MarketPairQuery>,
+) -> impl Responder {
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(20);
+
+    match MarketPairService::get_all_market_pairs_with_pagination(
+        &db_context,
+        page,
+        per_page,
+        query.exchange_id.clone(),
+        query.search.clone(),
+    ).await {
+        Ok((market_pairs, total)) => HttpResponse::Ok().json(ApiResponse::success("Market pairs retrieved successfully", json!({
+            "market_pairs": market_pairs,
+            "total": total,
+            "page": page,
+            "per_page": per_page
+        }))),
+        Err(err) => {
+            error!("Failed to retrieve market pairs in GET /market_pairs/with_pagination: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
 
 #[post("/market_pairs")]
 pub async fn create_market_pair(market_pair: web::Json<MarketPair>, db_context: web::Data<MongoDbContext>) -> impl Responder {
@@ -69,30 +119,5 @@ pub async fn delete_market_pair(path: web::Path<ObjectIdPath>, db_context: web::
     }
 }
 
-#[get("/market_pairs")]
-pub async fn get_all_market_pairs(
-    db_context: web::Data<MongoDbContext>,
-    query: web::Query<MarketPairQuery>,
-) -> impl Responder {
-    let page = query.page.unwrap_or(1);
-    let per_page = query.per_page.unwrap_or(20);
 
-    match MarketPairService::get_all_market_pairs(
-        &db_context,
-        page,
-        per_page,
-        query.exchange_id.clone(),
-        query.search.clone(),
-    ).await {
-        Ok((market_pairs, total)) => HttpResponse::Ok().json(ApiResponse::success("Market pairs retrieved successfully", json!({
-            "market_pairs": market_pairs,
-            "total": total,
-            "page": page,
-            "per_page": per_page
-        }))),
-        Err(err) => {
-            error!("Failed to retrieve market pairs in GET /market_pairs: {}", err);
-            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
-        },
-    }
-}
+
