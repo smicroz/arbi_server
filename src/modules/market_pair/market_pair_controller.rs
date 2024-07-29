@@ -21,6 +21,35 @@ struct MarketPairQuery {
     search: Option<String>,
 }
 
+#[get("/conversion_pairs")]
+pub async fn get_conversion_pairs(
+    query: web::Query<ConversionPairsQuery>,
+    db_context: web::Data<MongoDbContext>
+) -> impl Responder {
+    let pair1 = match ObjectId::parse_str(&query.pair1) {
+        Ok(id) => id,
+        Err(_) => return HttpResponse::BadRequest().json(ApiResponse::<String>::error("Invalid pair1 ID")),
+    };
+    let pair2 = match ObjectId::parse_str(&query.pair2) {
+        Ok(id) => id,
+        Err(_) => return HttpResponse::BadRequest().json(ApiResponse::<String>::error("Invalid pair2 ID")),
+    };
+
+    match MarketPairService::get_conversion_pairs(&db_context, pair1, pair2).await {
+        Ok(pairs) => HttpResponse::Ok().json(ApiResponse::success("Conversion pairs retrieved successfully", pairs)),
+        Err(err) => {
+            error!("Failed to retrieve conversion pairs: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct ConversionPairsQuery {
+    pair1: String,
+    pair2: String,
+}
+
 #[get("/market_pairs/by_exchange/{exchange_id}")]
 pub async fn get_market_pairs_by_exchange(
     exchange_id: web::Path<String>,
@@ -116,6 +145,29 @@ pub async fn delete_market_pair(path: web::Path<ObjectIdPath>, db_context: web::
             HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
         },
     }
+}
+
+
+#[get("/market_pairs/conversion_pairs_for_arbitrage")]
+pub async fn get_conversion_pairs_for_arbitrage(
+    query: web::Query<ConversionPairsQueryToArbitrage>,
+    db_context: web::Data<MongoDbContext>
+) -> impl Responder {
+    // Use query.pair1 and query.pair2 here
+    // Don't try to parse these as ObjectIds
+    match MarketPairService::get_conversion_pairs_for_arbitrage(&db_context, &query.pair1, &query.pair2).await {
+        Ok(pairs) => HttpResponse::Ok().json(ApiResponse::success("Conversion pairs for arbitrage retrieved successfully", pairs)),
+        Err(err) => {
+            error!("Failed to retrieve conversion pairs for arbitrage: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct ConversionPairsQueryToArbitrage {
+    pair1: String,
+    pair2: String,
 }
 
 

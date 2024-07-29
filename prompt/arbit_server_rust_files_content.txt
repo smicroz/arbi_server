@@ -1,0 +1,2225 @@
+Ruta: config.rs
+
+
+
+--------------------
+
+
+Ruta: db/mongodb.rs
+
+use mongodb::{Client as MongoClient, options::ClientOptions, Database};
+use std::env;
+
+#[derive(Clone)]
+pub struct MongoDbContext {
+    pub client: MongoClient,
+    pub db_name: String,
+}
+
+impl MongoDbContext {
+    pub fn new(client: MongoClient) -> Self {
+        let db_name = env::var("MONGODB_DBNAME").expect("MONGODB_DBNAME must be set");
+        Self { client, db_name }
+    }
+
+    pub fn get_database(&self) -> Database {
+        self.client.database(&self.db_name)
+    }
+}
+
+pub async fn get_mongodb_client() -> Result<MongoClient, mongodb::error::Error> {
+    let username = env::var("MONGODB_USERNAME").expect("MONGODB_USERNAME must be set");
+    let password = env::var("MONGODB_PASSWORD").expect("MONGODB_PASSWORD must be set");
+    let hostname = env::var("MONGODB_HOSTNAME").expect("MONGODB_HOSTNAME must be set");
+    let port = env::var("MONGODB_PORT").expect("MONGODB_PORT must be set");
+    let dbname = env::var("MONGODB_DBNAME").expect("MONGODB_DBNAME must be set");
+
+    let mongo_uri = format!(
+        "mongodb://{}:{}@{}:{}/{}?authSource=admin",
+        username, password, hostname, port, dbname
+    );
+
+    let mut client_options = ClientOptions::parse(&mongo_uri).await?;
+    client_options.app_name = Some(dbname.clone());
+
+    let client = MongoClient::with_options(client_options)?;
+    Ok(client)
+}
+
+
+--------------------
+
+
+Ruta: db/mod.rs
+
+pub mod mongodb;
+
+--------------------
+
+
+Ruta: main.rs
+
+mod db;
+mod modules;
+mod helpers;
+mod middleware;
+mod router; // Importa el archivo router.rs
+
+use actix_web::{web, App, HttpServer};
+use dotenv::dotenv;
+use crate::db::mongodb::{get_mongodb_client, MongoDbContext};
+use tracing::{error, info};
+use tracing_subscriber;
+use crate::middleware::auth_middleware::Auth;
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    dotenv().ok();
+
+    // Configurar tracing con variables de entorno
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    // Inicializar la conexión a MongoDB
+    let client = match get_mongodb_client().await {
+        Ok(client) => {
+            info!("Successfully connected to MongoDB!");
+            client
+        },
+        Err(e) => {
+            error!("Failed to connect to MongoDb: {}", e);
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to connect to MongoDB: {}", e)));
+        }
+    };
+
+    // Crear el contexto de MongoDbContext
+    let mongo_context = MongoDbContext::new(client);
+
+    // Iniciar el servidor HTTP de Actix Web
+    HttpServer::new(move || {
+        App::new()
+            .wrap(Auth) // Añadir el middleware de autenticación
+            .app_data(web::Data::new(mongo_context.clone())) // Pasar el contexto de MongoDbContext al contexto de Actix Web
+            .configure(router::configure) // Configurar las rutas usando router.rs
+    })
+    .bind("127.0.0.1:8081")?
+    .run()
+    .await
+}
+
+
+--------------------
+
+
+Ruta: modules/exchange/exchange_service.rs
+
+use crate::db::mongodb::MongoDbContext;
+use mongodb::bson::{doc, oid::ObjectId};
+use crate::modules::exchange::exchange_schema::Exchange;
+use tracing::error;
+use chrono::Utc;
+use futures::TryStreamExt;
+
+pub struct ExchangeService;
+
+impl ExchangeService {
+    pub async fn create_exchange(exchange: Exchange, db_context: &MongoDbContext) -> Result<Exchange, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Exchange>("exchanges");
+
+        let now = Utc::now().timestamp() as f64;
+        let new_exchange = Exchange {
+            created_at: now,
+            updated_at: now,
+            ..exchange
+        };
+
+        let insert_result = collection.insert_one(new_exchange.clone()).await
+            .map_err(|e| {
+                error!("Failed to insert exchange: {}", e);
+                e.to_string()
+            })?;
+        
+        let new_exchange = collection.find_one(doc! { "_id": insert_result.inserted_id }).await
+            .map_err(|e| {
+                error!("Failed to fetch created exchange: {}", e);
+                e.to_string()
+            })?
+            .ok_or_else(|| {
+                let msg = "Failed to fetch created exchange".to_string();
+                error!("{}", msg);
+                msg
+            })?;
+        
+        Ok(new_exchange)
+    }
+
+    pub async fn get_exchange(id: ObjectId, db_context: &MongoDbContext) -> Result<Exchange, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Exchange>("exchanges");
+
+        let exchange = collection.find_one(doc! { "_id": id }).await
+            .map_err(|e| {
+                error!("Failed to fetch exchange: {}", e);
+                e.to_string()
+            })?
+            .ok_or_else(|| {
+                let msg = "Exchange not found".to_string();
+                error!("{}", msg);
+                msg
+            })?;
+
+        Ok(exchange)
+    }
+
+    pub async fn update_exchange(id: ObjectId, updated_exchange: Exchange, db_context: &MongoDbContext) -> Result<Exchange, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Exchange>("exchanges");
+
+        let now = Utc::now().timestamp() as f64;
+        let update_doc = doc! {
+            "$set": {
+                "name": updated_exchange.name,
+                "short_name": updated_exchange.short_name,
+                "url": updated_exchange.url,
+                "updated_at": now,
+            }
+        };
+
+        collection.update_one(doc! { "_id": id }, update_doc).await
+            .map_err(|e| {
+                error!("Failed to update exchange: {}", e);
+                e.to_string()
+            })?;
+
+        Self::get_exchange(id, db_context).await
+    }
+
+    pub async fn delete_exchange(id: ObjectId, db_context: &MongoDbContext) -> Result<(), String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Exchange>("exchanges");
+
+        collection.delete_one(doc! { "_id": id }).await
+            .map_err(|e| {
+                error!("Failed to delete exchange: {}", e);
+                e.to_string()
+            })?;
+
+        Ok(())
+    }
+
+    pub async fn get_all_exchanges(db_context: &MongoDbContext) -> Result<Vec<Exchange>, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Exchange>("exchanges");
+
+        let mut cursor = collection.find(doc! {}).await
+            .map_err(|e| {
+                error!("Failed to fetch all exchanges: {}", e);
+                e.to_string()
+            })?;
+
+        let mut exchanges = Vec::new();
+        while let Some(exchange) = cursor.try_next().await.map_err(|e| {
+            error!("Failed to iterate through exchanges: {}", e);
+            e.to_string()
+        })? {
+            exchanges.push(exchange);
+        }
+
+        Ok(exchanges)
+    }
+}
+
+
+--------------------
+
+
+Ruta: modules/exchange/exchange_controller.rs
+
+use actix_web::{get, post, put, delete, web, HttpResponse, Responder};
+use crate::modules::exchange::exchange_service::ExchangeService;
+use crate::db::mongodb::MongoDbContext;
+use crate::modules::exchange::exchange_schema::Exchange;
+use mongodb::bson::oid::ObjectId;
+use serde::{Deserialize};
+use crate::modules::auth::auth_response::ApiResponse;
+use tracing::{ error};
+
+#[derive(Deserialize)]
+struct ObjectIdPath {
+    id: String,
+}
+
+#[post("/exchanges")]
+pub async fn create_exchange(exchange: web::Json<Exchange>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    match ExchangeService::create_exchange(exchange.into_inner(), &db_context).await {
+        Ok(exchange) => HttpResponse::Ok().json(ApiResponse::success("Exchange created successfully", exchange)),
+        Err(err) => {
+            error!("Failed to create exchange: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[get("/exchanges/{id}")]
+pub async fn get_exchange(path: web::Path<ObjectIdPath>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match ExchangeService::get_exchange(id, &db_context).await {
+        Ok(exchange) => HttpResponse::Ok().json(ApiResponse::success("Exchange retrieved successfully", exchange)),
+        Err(err) => {
+            error!("Failed to retrieve exchange: {}", err);
+            HttpResponse::NotFound().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[put("/exchanges/{id}")]
+pub async fn update_exchange(path: web::Path<ObjectIdPath>, exchange: web::Json<Exchange>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match ExchangeService::update_exchange(id, exchange.into_inner(), &db_context).await {
+        Ok(exchange) => HttpResponse::Ok().json(ApiResponse::success("Exchange updated successfully", exchange)),
+        Err(err) => {
+            error!("Failed to update exchange: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[delete("/exchanges/{id}")]
+pub async fn delete_exchange(path: web::Path<ObjectIdPath>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match ExchangeService::delete_exchange(id, &db_context).await {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse::success("Exchange deleted successfully", ())),
+        Err(err) => {
+            error!("Failed to delete exchange: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[get("/exchanges")]
+pub async fn get_all_exchanges(db_context: web::Data<MongoDbContext>) -> impl Responder {
+    match ExchangeService::get_all_exchanges(&db_context).await {
+        Ok(exchanges) => HttpResponse::Ok().json(ApiResponse::success("Exchanges retrieved successfully", exchanges)),
+        Err(err) => {
+            error!("Failed to retrieve exchanges: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+
+--------------------
+
+
+Ruta: modules/exchange/exchange_schema.rs
+
+use serde::{Serialize, Deserialize};
+use mongodb::bson::oid::ObjectId;
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Exchange {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub name: String,
+    pub short_name: String,
+    pub url: String,
+    pub created_at: f64,
+    pub updated_at: f64,
+}
+
+
+--------------------
+
+
+Ruta: modules/exchange/mod.rs
+
+pub mod exchange_schema;
+pub mod exchange_service;
+pub mod exchange_controller;
+
+use actix_web::web;
+
+pub fn init(cfg: &mut web::ServiceConfig) {
+    cfg.service(exchange_controller::create_exchange);
+    cfg.service(exchange_controller::get_exchange);
+    cfg.service(exchange_controller::update_exchange);
+    cfg.service(exchange_controller::delete_exchange);
+    cfg.service(exchange_controller::get_all_exchanges);
+}
+
+
+--------------------
+
+
+Ruta: modules/user/user_schema.rs
+
+use serde::{Serialize, Deserialize};
+use mongodb::bson::oid::ObjectId;
+use chrono::NaiveDateTime;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct User {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub name: String,
+    pub email: String,
+    pub password: String,
+    pub _default_asset: Option<ObjectId>,
+    pub _default_market_pair: Option<ObjectId>,
+    pub password_reset_token: String,
+    pub password_reset_expires: NaiveDateTime,
+    pub tokens: Vec<String>, // Almacenar tokens activos
+    pub role: String, // Almacenar el rol del usuario (e.g., "user", "admin")
+}
+
+
+--------------------
+
+
+Ruta: modules/user/mod.rs
+
+pub mod user_schema;
+
+--------------------
+
+
+Ruta: modules/asset/asset_schema.rs
+
+use serde::{Serialize, Deserialize};
+use mongodb::bson::oid::ObjectId;
+
+#[derive(Serialize, Deserialize, Debug, Clone)] // Añadir Clone
+pub struct Asset {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub _exchange: ObjectId,
+    pub name: String,
+    pub short_name: String,
+    pub created_at: f64,
+    pub updated_at: f64,
+    pub status: bool,
+}
+
+
+--------------------
+
+
+Ruta: modules/asset/asset_service.rs
+
+use crate::db::mongodb::MongoDbContext;
+use mongodb::bson::{doc, Document, oid::ObjectId, Regex};  // Añade Document aquí
+use crate::modules::asset::asset_schema::Asset;
+use tracing::error;
+use chrono::Utc;
+use futures::TryStreamExt;
+pub struct AssetService;
+
+impl AssetService {
+    pub async fn create_asset(asset: Asset, db_context: &MongoDbContext) -> Result<Asset, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Asset>("assets");
+
+        let now = Utc::now().timestamp() as f64;
+        let new_asset = Asset {
+            created_at: now,
+            updated_at: now,
+            ..asset
+        };
+
+        let insert_result = collection.insert_one(new_asset.clone()).await
+            .map_err(|e| {
+                error!("Failed to insert asset: {}", e);
+                e.to_string()
+            })?;
+        
+        let new_asset = collection.find_one(doc! { "_id": insert_result.inserted_id }).await
+            .map_err(|e| {
+                error!("Failed to fetch created asset: {}", e);
+                e.to_string()
+            })?
+            .ok_or_else(|| {
+                let msg = "Failed to fetch created asset".to_string();
+                error!("{}", msg);
+                msg
+            })?;
+        
+        Ok(new_asset)
+    }
+
+    pub async fn get_asset(id: ObjectId, db_context: &MongoDbContext) -> Result<Asset, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Asset>("assets");
+
+        let asset = collection.find_one(doc! { "_id": id }).await
+            .map_err(|e| {
+                error!("Failed to fetch asset: {}", e);
+                e.to_string()
+            })?
+            .ok_or_else(|| {
+                let msg = "Asset not found".to_string();
+                error!("{}", msg);
+                msg
+            })?;
+
+        Ok(asset)
+    }
+
+    pub async fn update_asset(id: ObjectId, updated_asset: Asset, db_context: &MongoDbContext) -> Result<Asset, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Asset>("assets");
+
+        let now = Utc::now().timestamp() as f64;
+        let update_doc = doc! {
+            "$set": {
+                "name": updated_asset.name,
+                "short_name": updated_asset.short_name,
+                "updated_at": now,
+                "status": updated_asset.status,
+                "_exchange": updated_asset._exchange,
+            }
+        };
+
+        collection.update_one(doc! { "_id": id }, update_doc).await
+            .map_err(|e| {
+                error!("Failed to update asset: {}", e);
+                e.to_string()
+            })?;
+
+        Self::get_asset(id, db_context).await
+    }
+
+    pub async fn delete_asset(id: ObjectId, db_context: &MongoDbContext) -> Result<(), String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Asset>("assets");
+
+        collection.delete_one(doc! { "_id": id }).await
+            .map_err(|e| {
+                error!("Failed to delete asset: {}", e);
+                e.to_string()
+            })?;
+
+        Ok(())
+    }
+
+    pub async fn get_all_assets(
+        db_context: &MongoDbContext,
+        page: u64,
+        per_page: u64,
+        include_exchange: bool,
+        search: Option<String>
+    ) -> Result<(Vec<Document>, u64), String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<Document>("assets");
+
+        let skip = (page - 1) * per_page;
+        
+        // Construir el filtro basado en el término de búsqueda
+        let filter = match search {
+            Some(term) => doc! {
+                "$or": [
+                    { "name": Regex { pattern: format!(".*{}.*", term), options: "i".to_string() } },
+                    { "short_name": Regex { pattern: format!(".*{}.*", term), options: "i".to_string() } }
+                ]
+            },
+            None => doc! {},
+        };
+
+        let mut pipeline = vec![
+            doc! { "$match": filter.clone() },
+            doc! { "$skip": skip as i64 },
+            doc! { "$limit": per_page as i64 },
+        ];
+
+        if include_exchange {
+            pipeline.push(doc! {
+                "$lookup": {
+                    "from": "exchanges",
+                    "localField": "_exchange",
+                    "foreignField": "_id",
+                    "as": "exchange"
+                }
+            });
+            pipeline.push(doc! {
+                "$unwind": {
+                    "path": "$exchange",
+                    "preserveNullAndEmptyArrays": true
+                }
+            });
+        }
+
+        let mut cursor = collection.aggregate(pipeline).await
+            .map_err(|e| {
+                error!("Failed to fetch assets: {}", e);
+                e.to_string()
+            })?;
+
+        let mut assets = Vec::new();
+        while let Some(asset) = cursor.try_next().await.map_err(|e| {
+            error!("Failed to iterate through assets: {}", e);
+            e.to_string()
+        })? {
+            assets.push(asset);
+        }
+
+        let total = collection.count_documents(filter).await
+            .map_err(|e| {
+                error!("Failed to count assets: {}", e);
+                e.to_string()
+            })?;
+
+        Ok((assets, total))
+    }
+}
+
+
+--------------------
+
+
+Ruta: modules/asset/asset_controller.rs
+
+use actix_web::{get, post, put, delete, web, HttpResponse, Responder};
+use crate::modules::asset::asset_service::AssetService;
+use crate::db::mongodb::MongoDbContext;
+use crate::modules::asset::asset_schema::Asset;
+use mongodb::bson::oid::ObjectId;
+use serde::{Deserialize};
+use serde_json::json; 
+
+#[derive(Deserialize)]
+struct ObjectIdPath {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct AssetQuery {
+    page: Option<u64>,
+    per_page: Option<u64>,
+    include_exchange: Option<bool>,
+    search: Option<String>,
+}
+
+#[post("/assets")]
+pub async fn create_asset(asset: web::Json<Asset>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    match AssetService::create_asset(asset.into_inner(), &db_context).await {
+        Ok(asset) => HttpResponse::Ok().json(asset),
+        Err(err) => HttpResponse::BadRequest().body(err),
+    }
+}
+
+#[get("/assets/{id}")]
+pub async fn get_asset(path: web::Path<ObjectIdPath>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match AssetService::get_asset(id, &db_context).await {
+        Ok(asset) => HttpResponse::Ok().json(asset),
+        Err(err) => HttpResponse::NotFound().body(err),
+    }
+}
+
+#[put("/assets/{id}")]
+pub async fn update_asset(path: web::Path<ObjectIdPath>, asset: web::Json<Asset>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match AssetService::update_asset(id, asset.into_inner(), &db_context).await {
+        Ok(asset) => HttpResponse::Ok().json(asset),
+        Err(err) => HttpResponse::BadRequest().body(err),
+    }
+}
+
+#[delete("/assets/{id}")]
+pub async fn delete_asset(path: web::Path<ObjectIdPath>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match AssetService::delete_asset(id, &db_context).await {
+        Ok(_) => HttpResponse::Ok().finish(),
+        Err(err) => HttpResponse::BadRequest().body(err),
+    }
+}
+
+#[get("/assets")]
+pub async fn get_all_assets(
+    db_context: web::Data<MongoDbContext>,
+    query: web::Query<AssetQuery>,
+) -> impl Responder {
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(20);
+    let include_exchange = query.include_exchange.unwrap_or(false);
+    let search = query.search.clone();
+
+    match AssetService::get_all_assets(&db_context, page, per_page, include_exchange, search).await {
+        Ok((assets, total)) => HttpResponse::Ok().json(json!({
+            "assets": assets,
+            "total": total,
+            "page": page,
+            "per_page": per_page
+        })),
+        Err(err) => HttpResponse::BadRequest().body(err),
+    }
+}
+
+--------------------
+
+
+Ruta: modules/asset/mod.rs
+
+pub mod asset_controller;
+pub mod asset_service;
+pub mod asset_schema;
+
+use actix_web::web;
+
+pub fn init(cfg: &mut web::ServiceConfig) {
+    cfg.service(asset_controller::create_asset);
+    cfg.service(asset_controller::get_asset);
+    cfg.service(asset_controller::update_asset);
+    cfg.service(asset_controller::delete_asset);
+    cfg.service(asset_controller::get_all_assets);
+}
+
+
+--------------------
+
+
+Ruta: modules/account/account_service.rs
+
+use crate::modules::user::user_schema::User;
+use mongodb::bson::{doc, oid::ObjectId};
+use crate::db::mongodb::MongoDbContext;
+use tracing::{ error};
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct UpdateUserRequest {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub password: Option<String>,
+    pub _default_asset: Option<String>, // Mantén este campo como String para recibirlo desde el frontend
+    pub _default_market_pair: Option<String>, // Mantén este campo como String para recibirlo desde el frontend
+}
+
+pub struct AccountService;
+
+impl AccountService {
+    pub async fn get_user(user_id: ObjectId, db_context: &MongoDbContext) -> Result<User, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<User>("users");
+
+        let user = collection
+            .find_one(doc! { "_id": user_id })
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                error!("User not found: {}", user_id);
+                "User not found".to_string()
+            })?;
+
+        Ok(user)
+    }
+
+    pub async fn update_user(user_id: ObjectId, update_data: UpdateUserRequest, db_context: &MongoDbContext) -> Result<User, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<User>("users");
+
+        let mut update_doc = doc! {};
+
+
+        if let Some(name) = update_data.name {
+            update_doc.insert("name", name);
+        }
+
+        if let Some(email) = update_data.email {
+            update_doc.insert("email", email);
+        }
+
+        // Solo actualiza la contraseña si se proporciona y no está vacía
+        if let Some(password) = update_data.password {
+            if !password.is_empty() {
+                let hashed_password = bcrypt::hash(password, bcrypt::DEFAULT_COST).map_err(|e| e.to_string())?;
+                update_doc.insert("password", hashed_password);
+            }
+        }
+
+        println!("{:?}", update_data._default_market_pair);
+        if let Some(default_asset) = update_data._default_market_pair {
+            // Convertir el default_asset de String a ObjectId
+            let default_asset_id = ObjectId::parse_str(&default_asset).map_err(|e| e.to_string())?;
+            update_doc.insert("_default_market_pair", default_asset_id);
+        }
+
+        // Solo realiza la actualización si hay campos para actualizar
+        if !update_doc.is_empty() {
+            collection
+                .update_one(doc! { "_id": user_id }, doc! { "$set": update_doc })
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        Self::get_user(user_id, db_context).await
+    }
+}
+
+
+--------------------
+
+
+Ruta: modules/account/account_controller.rs
+
+use actix_web::{get, put, web, HttpResponse, Responder};
+use crate::modules::account::account_service::{AccountService, UpdateUserRequest};
+use crate::db::mongodb::MongoDbContext;
+use crate::modules::auth::auth_response::ApiResponse;
+use mongodb::bson::oid::ObjectId;
+use tracing::{info, error};
+
+#[get("/account/{id}")]
+pub async fn get_user(path: web::Path<String>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let user_id = path.into_inner();
+    let user_id = match ObjectId::parse_str(&user_id) {
+        Ok(id) => id,
+        Err(_) => {
+            error!("Invalid user ID: {}", user_id);
+            return HttpResponse::BadRequest().json(ApiResponse::<()>::error("Invalid user ID"));
+        },
+    };
+
+    match AccountService::get_user(user_id, &db_context).await {
+        Ok(user) => {
+            info!("User retrieved successfully: {}", user_id);
+            HttpResponse::Ok().json(ApiResponse::success("User retrieved successfully", user))
+        },
+        Err(err) => {
+            error!("Failed to retrieve user: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<()>::error(&err))
+        },
+    }
+}
+
+#[put("/account/{id}")]
+pub async fn update_user(path: web::Path<String>, data: web::Json<UpdateUserRequest>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let user_id = path.into_inner();
+    let user_id = match ObjectId::parse_str(&user_id) {
+        Ok(id) => id,
+        Err(_) => {
+            error!("Invalid user ID: {}", user_id);
+            return HttpResponse::BadRequest().json(ApiResponse::<()>::error("Invalid user ID"));
+        },
+    };
+
+    match AccountService::update_user(user_id, data.into_inner(), &db_context).await {
+        Ok(user) => {
+            info!("User updated successfully: {}", user_id);
+            HttpResponse::Ok().json(ApiResponse::success("User updated successfully", user))
+        },
+        Err(err) => {
+            error!("Failed to update user: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<()>::error(&err))
+        },
+    }
+}
+
+
+--------------------
+
+
+Ruta: modules/account/mod.rs
+
+pub mod account_service;
+pub mod account_controller;
+
+use actix_web::web;
+
+pub fn init(cfg: &mut web::ServiceConfig) {
+    cfg.service(account_controller::get_user);
+    cfg.service(account_controller::update_user);
+}
+
+
+--------------------
+
+
+Ruta: modules/auth/auth_service.rs
+
+use crate::modules::user::user_schema::User;
+use mongodb::bson::{doc};
+use bcrypt::{hash, verify, DEFAULT_COST}; // Importar bcrypt
+use jsonwebtoken::{encode, Header, EncodingKey}; // Importaciones necesarias
+use tracing::{info, error};
+use crate::db::mongodb::MongoDbContext;
+use chrono::{Utc, Duration};
+use std::env;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub id: String,           // Añadir campo id
+    pub token: String,
+    pub name: String,
+    pub email: String,
+    pub _default_asset: Option<String>, // Enviar como String en la respuesta JSON
+    pub _default_market_pair: Option<String>, // Enviar como String en la respuesta JSON
+}
+
+pub struct AuthService;
+
+impl AuthService {
+    pub async fn login(email: &str, password: &str, db_context: &MongoDbContext) -> Result<AuthResponse, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<User>("users");
+
+        // Buscar el usuario por email
+        let user = collection
+            .find_one(doc! { "email": email })
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                error!("User not found: {}", email);
+                "User not found".to_string()
+            })?;
+
+        // Verificar la contraseña proporcionada con el hash almacenado
+        if !verify(password, &user.password).map_err(|e| e.to_string())? {
+            error!("Invalid password for user: {}", email);
+            return Err("Invalid password".to_string());
+        }
+
+        // Configurar el tiempo de expiración del token (por ejemplo, 12 horas)
+        let expiration = Utc::now() + Duration::hours(12);
+        let my_claims = Claims {
+            sub: user.id.unwrap().to_hex(),
+            exp: expiration.timestamp() as usize,
+        };
+        let token = encode(&Header::default(), &my_claims, &EncodingKey::from_secret(env::var("SECRET_KEY").expect("SECRET_KEY must be set").as_ref())).map_err(|e| e.to_string())?;
+
+        let auth_response = AuthResponse {
+            id: user.id.unwrap().to_hex(), // Añadir el id del usuario
+            token,
+            name: user.name,
+            email: user.email,
+            _default_asset: user._default_asset.map(|id| id.to_hex()), // Convertir ObjectId a String
+            _default_market_pair: user._default_market_pair.map(|id| id.to_hex()), // Convertir ObjectId a String
+        };
+
+        Ok(auth_response)
+    }
+
+    pub async fn register(name: &str, email: &str, password: &str, db_context: &MongoDbContext) -> Result<AuthResponse, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<User>("users");
+
+        // Verificar si el usuario ya existe
+        if let Some(_) = collection
+            .find_one(doc! { "email": email })
+            .await
+            .map_err(|e| e.to_string())? {
+            return Err("User already exists".to_string());
+        }
+
+        // Generar hash de la contraseña
+        let hashed_password = hash(password, DEFAULT_COST).map_err(|e| e.to_string())?;
+
+        let mut user = User {
+            id: None,
+            name: name.to_string(),
+            email: email.to_string(),
+            password: hashed_password,
+            _default_asset: None, // El campo default_asset está vacío al registrar
+            _default_market_pair: None, // El campo default_market_pair está vacío al registrar
+            password_reset_token: String::new(),
+            password_reset_expires: chrono::Utc::now().naive_utc(),
+            tokens: vec![],
+            role: "user".to_string(),
+        };
+
+        let insert_result = collection
+            .insert_one(&user)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Actualizar el user.id con el _id generado por MongoDB
+        user.id = Some(insert_result.inserted_id.as_object_id().unwrap());
+
+        // Generar el token JWT para el nuevo usuario registrado
+        let expiration = Utc::now() + Duration::hours(12);
+        let my_claims = Claims {
+            sub: user.id.unwrap().to_hex(),
+            exp: expiration.timestamp() as usize,
+        };
+        let token = encode(&Header::default(), &my_claims, &EncodingKey::from_secret(env::var("SECRET_KEY").expect("SECRET_KEY must be set").as_ref())).map_err(|e| e.to_string())?;
+
+        let auth_response = AuthResponse {
+            id: user.id.unwrap().to_hex(), // Añadir el id del usuario
+            token,
+            name: user.name,
+            email: user.email,
+            _default_asset: user._default_asset.map(|id| id.to_hex()), // Convertir ObjectId a String
+            _default_market_pair: user._default_market_pair.map(|id| id.to_hex()), // Convertir ObjectId a String
+        };
+
+        info!("User registered: {}", email);
+        Ok(auth_response)
+    }
+}
+
+
+--------------------
+
+
+Ruta: modules/auth/auth_model.rs
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct RegisterRequest {
+    pub name: String,
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+--------------------
+
+
+Ruta: modules/auth/auth_response.rs
+
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct ApiResponse<T> {
+    pub message: String,
+    pub data: Option<T>,
+}
+
+impl<T> ApiResponse<T> {
+    pub fn success(message: &str, data: T) -> Self {
+        ApiResponse {
+            message: message.to_string(),
+            data: Some(data),
+        }
+    }
+
+    pub fn error(message: &str) -> Self {
+        ApiResponse {
+            message: message.to_string(),
+            data: None,
+        }
+    }
+}
+
+
+--------------------
+
+
+Ruta: modules/auth/auth_controller.rs
+
+use actix_web::{post, web, HttpResponse, Responder};
+use crate::modules::auth::auth_service::AuthService;
+use crate::db::mongodb::MongoDbContext;
+use crate::modules::auth::auth_model::{RegisterRequest, LoginRequest};
+use crate::modules::auth::auth_response::ApiResponse;
+
+#[post("/register")]
+pub async fn register(data: web::Json<RegisterRequest>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let request = data.into_inner();
+    match AuthService::register(&request.name, &request.email, &request.password, &db_context).await {
+        Ok(auth_response) => HttpResponse::Ok().json(ApiResponse::success("Registration successful", auth_response)),
+        Err(err) => HttpResponse::BadRequest().json(ApiResponse::<()>::error(&err)),
+    }
+}
+
+#[post("/login")]
+pub async fn login(data: web::Json<LoginRequest>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let request = data.into_inner();
+    match AuthService::login(&request.email, &request.password, &db_context).await {
+        Ok(auth_response) => HttpResponse::Ok().json(ApiResponse::success("Login successful", auth_response)),
+        Err(err) => HttpResponse::Unauthorized().json(ApiResponse::<()>::error(&err)),
+    }
+}
+
+
+--------------------
+
+
+Ruta: modules/auth/mod.rs
+
+pub mod auth_service;
+pub mod auth_controller;
+pub mod auth_model;
+pub mod auth_response;
+
+use actix_web::web;
+
+pub fn init(cfg: &mut web::ServiceConfig) {
+    cfg.service(auth_controller::login);
+    cfg.service(auth_controller::register);
+}
+
+
+--------------------
+
+
+Ruta: modules/arbitrage_strategy/arbitrage_strategy_controller.rs
+
+use actix_web::{get, post, put, delete, web, HttpResponse, Responder};
+use crate::modules::arbitrage_strategy::arbitrage_strategy_service::ArbitrageStrategyService;
+use crate::db::mongodb::MongoDbContext;
+use crate::modules::arbitrage_strategy::arbitrage_strategy_schema::{ArbitrageStrategy, ArbitrageType};
+use mongodb::bson::oid::ObjectId;
+use serde::{Deserialize};
+use crate::modules::auth::auth_response::ApiResponse;
+use tracing::error;
+use serde_json::json;
+
+#[derive(Deserialize)]
+struct ObjectIdPath {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct ArbitrageStrategyQuery {
+    page: Option<u64>,
+    per_page: Option<u64>,
+    arbitrage_type: Option<ArbitrageType>,
+}
+
+// #[post("/arbitrage-strategies")]
+// pub async fn create_arbitrage_strategy(strategy: web::Json<ArbitrageStrategy>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+//     println!("Creating arbitrage strategy");
+//     match ArbitrageStrategyService::create_arbitrage_strategy(strategy.into_inner(), &db_context).await {
+//         Ok(strategy) => HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy created successfully", strategy)),
+//         Err(err) => {
+//             error!("Failed to create arbitrage strategy: {}", err);
+//             HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+//         },
+//     }
+// }
+
+#[post("/arbitrage-strategies")]
+pub async fn create_arbitrage_strategy(
+    strategy: web::Json<ArbitrageStrategy>,
+    db_context: web::Data<MongoDbContext>
+) -> impl Responder {
+    println!("Received data: {:?}", strategy);
+
+    let parsed_strategy = strategy.into_inner();
+    
+    match ArbitrageStrategyService::create_arbitrage_strategy(parsed_strategy, &db_context).await {
+        Ok(created_strategy) => {
+            println!("Strategy created successfully: {:?}", created_strategy);
+            HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy created successfully", created_strategy))
+        },
+        Err(err) => {
+            error!("Failed to create arbitrage strategy: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&format!("Failed to create strategy: {}", err)))
+        },
+    }
+}
+
+#[get("/arbitrage-strategies/{id}")]
+pub async fn get_arbitrage_strategy(path: web::Path<ObjectIdPath>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match ArbitrageStrategyService::get_arbitrage_strategy(id, &db_context).await {
+        Ok(strategy) => HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy retrieved successfully", strategy)),
+        Err(err) => {
+            error!("Failed to retrieve arbitrage strategy: {}", err);
+            HttpResponse::NotFound().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[put("/arbitrage-strategies/{id}")]
+pub async fn update_arbitrage_strategy(path: web::Path<ObjectIdPath>, strategy: web::Json<ArbitrageStrategy>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match ArbitrageStrategyService::update_arbitrage_strategy(id, strategy.into_inner(), &db_context).await {
+        Ok(strategy) => HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy updated successfully", strategy)),
+        Err(err) => {
+            error!("Failed to update arbitrage strategy: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[delete("/arbitrage-strategies/{id}")]
+pub async fn delete_arbitrage_strategy(path: web::Path<ObjectIdPath>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match ArbitrageStrategyService::delete_arbitrage_strategy(id, &db_context).await {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy deleted successfully", ())),
+        Err(err) => {
+            error!("Failed to delete arbitrage strategy: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[get("/arbitrage-strategies")]
+pub async fn get_all_arbitrage_strategies(
+    db_context: web::Data<MongoDbContext>,
+    query: web::Query<ArbitrageStrategyQuery>,
+) -> impl Responder {
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(20);
+    
+    match ArbitrageStrategyService::get_all_arbitrage_strategies(
+        &db_context,
+        page,
+        per_page,
+        query.arbitrage_type.clone(),
+    ).await {
+        Ok((strategies, total)) => HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategies retrieved successfully", json!({
+            "strategies": strategies,
+            "total": total,
+            "page": page,
+            "per_page": per_page
+        }))),
+        Err(err) => {
+            error!("Failed to retrieve arbitrage strategies: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+--------------------
+
+
+Ruta: modules/arbitrage_strategy/arbitrage_strategy_service.rs
+
+use crate::db::mongodb::MongoDbContext;
+use mongodb::bson::{doc, oid::ObjectId};
+use crate::modules::arbitrage_strategy::arbitrage_strategy_schema::{ArbitrageStrategy, ArbitrageType, ArbitrageDetails};
+use tracing::error;
+use chrono::Utc;
+use futures::TryStreamExt;
+use mongodb::bson;
+
+pub struct ArbitrageStrategyService;
+
+impl ArbitrageStrategyService {
+    pub async fn create_arbitrage_strategy(mut strategy: ArbitrageStrategy, db_context: &MongoDbContext) -> Result<ArbitrageStrategy, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<ArbitrageStrategy>("arbitrage_strategies");
+    
+        let now = Utc::now().timestamp() as f64;
+        strategy.created_at = now;
+        strategy.updated_at = now;
+    
+        // Convertir strings a ObjectId si es necesario
+        if let ArbitrageDetails::Geographic(ref mut geo) = strategy.details {
+            geo.pair1 = ObjectId::parse_str(&geo.pair1.to_string()).map_err(|e| e.to_string())?;
+            geo.pair2 = ObjectId::parse_str(&geo.pair2.to_string()).map_err(|e| e.to_string())?;
+            geo.conversion_pair = ObjectId::parse_str(&geo.conversion_pair.to_string()).map_err(|e| e.to_string())?;
+        }
+    
+        let insert_result = collection.insert_one(strategy.clone()).await
+            .map_err(|e| {
+                error!("Failed to insert arbitrage strategy: {}", e);
+                e.to_string()
+            })?;
+        
+        let new_strategy = collection.find_one(doc! { "_id": insert_result.inserted_id }).await
+            .map_err(|e| {
+                error!("Failed to fetch created arbitrage strategy: {}", e);
+                e.to_string()
+            })?
+            .ok_or_else(|| {
+                let msg = "Failed to fetch created arbitrage strategy".to_string();
+                error!("{}", msg);
+                msg
+            })?;
+        
+        Ok(new_strategy)
+    }
+
+    pub async fn get_arbitrage_strategy(id: ObjectId, db_context: &MongoDbContext) -> Result<ArbitrageStrategy, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<ArbitrageStrategy>("arbitrage_strategies");
+
+        let strategy = collection.find_one(doc! { "_id": id }).await
+            .map_err(|e| {
+                error!("Failed to fetch arbitrage strategy: {}", e);
+                e.to_string()
+            })?
+            .ok_or_else(|| {
+                let msg = "Arbitrage strategy not found".to_string();
+                error!("{}", msg);
+                msg
+            })?;
+
+        Ok(strategy)
+    }
+
+    pub async fn update_arbitrage_strategy(id: ObjectId, updated_strategy: ArbitrageStrategy, db_context: &MongoDbContext) -> Result<ArbitrageStrategy, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<ArbitrageStrategy>("arbitrage_strategies");
+
+        let now = Utc::now().timestamp() as f64;
+        let update_doc = doc! {
+            "$set": {
+                "arbitrage_type": bson::to_bson(&updated_strategy.arbitrage_type)
+                    .map_err(|e| e.to_string())?,
+                "details": bson::to_bson(&updated_strategy.details)
+                    .map_err(|e| e.to_string())?,
+                "updated_at": now,
+                "status": updated_strategy.status,
+            }
+        };
+
+        collection.update_one(doc! { "_id": id }, update_doc).await
+            .map_err(|e| {
+                error!("Failed to update arbitrage strategy: {}", e);
+                e.to_string()
+            })?;
+
+        Self::get_arbitrage_strategy(id, db_context).await
+    }
+
+    pub async fn delete_arbitrage_strategy(id: ObjectId, db_context: &MongoDbContext) -> Result<(), String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<ArbitrageStrategy>("arbitrage_strategies");
+
+        collection.delete_one(doc! { "_id": id }).await
+            .map_err(|e| {
+                error!("Failed to delete arbitrage strategy: {}", e);
+                e.to_string()
+            })?;
+
+        Ok(())
+    }
+
+    pub async fn get_all_arbitrage_strategies(
+        db_context: &MongoDbContext,
+        page: u64,
+        per_page: u64,
+        arbitrage_type: Option<ArbitrageType>,
+    ) -> Result<(Vec<ArbitrageStrategy>, u64), String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<ArbitrageStrategy>("arbitrage_strategies");
+
+        let skip = (page - 1) * per_page;
+        
+        let mut filter = doc! {};
+        if let Some(arb_type) = arbitrage_type {
+            filter.insert("arbitrage_type", bson::to_bson(&arb_type)
+                .map_err(|e| e.to_string())?);
+        }
+
+        let mut cursor = collection.find(filter.clone()).skip(skip as u64).limit(per_page as i64).await
+            .map_err(|e| {
+                error!("Failed to fetch arbitrage strategies: {}", e);
+                e.to_string()
+            })?;
+
+        let mut strategies = Vec::new();
+        while let Some(strategy) = cursor.try_next().await.map_err(|e| {
+            error!("Failed to iterate through arbitrage strategies: {}", e);
+            e.to_string()
+        })? {
+            strategies.push(strategy);
+        }
+
+        let total = collection.count_documents(filter).await
+            .map_err(|e| {
+                error!("Failed to count arbitrage strategies: {}", e);
+                e.to_string()
+            })?;
+
+        Ok((strategies, total))
+    }
+}
+
+--------------------
+
+
+Ruta: modules/arbitrage_strategy/arbitrage_strategy_schema.rs
+
+use serde::{Serialize, Deserialize};
+use mongodb::bson::oid::ObjectId;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ArbitrageType {
+    Geographic,
+    Exchange,
+    Triangular,
+    TradingPair,
+}
+
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ArbitrageStrategy {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub arbitrage_type: ArbitrageType,
+    pub details: ArbitrageDetails,
+    #[serde(default)]
+    pub created_at: f64,
+    #[serde(default)]
+    pub updated_at: f64,
+    pub status: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum ArbitrageDetails {
+    Geographic(GeographicArbitrage),
+    Exchange(ExchangeArbitrage),
+    Triangular(TriangularArbitrage),
+    TradingPair(TradingPairArbitrage),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GeographicArbitrage {
+    pub pair1: ObjectId,
+    pub pair2: ObjectId,
+    pub conversion_pair: ObjectId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExchangeArbitrage {
+    pub pair1: ObjectId,
+    pub pair2: ObjectId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TriangularArbitrage {
+    pub pair1: ObjectId,
+    pub pair2: ObjectId,
+    pub pair3: ObjectId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TradingPairArbitrage {
+    pub pair1: ObjectId,
+    pub pair2: ObjectId,
+    pub pair3: ObjectId,
+}
+
+--------------------
+
+
+Ruta: modules/arbitrage_strategy/mod.rs
+
+pub mod arbitrage_strategy_schema;
+pub mod arbitrage_strategy_service;
+pub mod arbitrage_strategy_controller;
+
+use actix_web::web;
+
+pub fn init(cfg: &mut web::ServiceConfig) {
+    cfg.service(arbitrage_strategy_controller::create_arbitrage_strategy);
+    cfg.service(arbitrage_strategy_controller::get_arbitrage_strategy);
+    cfg.service(arbitrage_strategy_controller::update_arbitrage_strategy);
+    cfg.service(arbitrage_strategy_controller::delete_arbitrage_strategy);
+    cfg.service(arbitrage_strategy_controller::get_all_arbitrage_strategies);
+}
+
+--------------------
+
+
+Ruta: modules/mod.rs
+
+pub mod auth;
+pub mod account;
+pub mod user;
+pub mod asset;
+pub mod market_pair;
+pub mod exchange;
+pub mod arbitrage_strategy;
+
+--------------------
+
+
+Ruta: modules/market_pair/market_pair_controller.rs
+
+use actix_web::{get, post, put, delete, web, HttpResponse, Responder};
+use crate::modules::market_pair::market_pair_service::MarketPairService;
+use crate::db::mongodb::MongoDbContext;
+use crate::modules::market_pair::market_pair_schema::MarketPair;
+use mongodb::bson::oid::ObjectId;
+use serde::{Deserialize};
+use crate::modules::auth::auth_response::ApiResponse;
+use tracing::{error};
+use serde_json::json;
+
+#[derive(Deserialize)]
+struct ObjectIdPath {
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+struct MarketPairQuery {
+    page: Option<u64>,
+    per_page: Option<u64>,
+    exchange_id: Option<String>,
+    search: Option<String>,
+}
+
+#[get("/conversion_pairs")]
+pub async fn get_conversion_pairs(
+    query: web::Query<ConversionPairsQuery>,
+    db_context: web::Data<MongoDbContext>
+) -> impl Responder {
+    let pair1 = match ObjectId::parse_str(&query.pair1) {
+        Ok(id) => id,
+        Err(_) => return HttpResponse::BadRequest().json(ApiResponse::<String>::error("Invalid pair1 ID")),
+    };
+    let pair2 = match ObjectId::parse_str(&query.pair2) {
+        Ok(id) => id,
+        Err(_) => return HttpResponse::BadRequest().json(ApiResponse::<String>::error("Invalid pair2 ID")),
+    };
+
+    match MarketPairService::get_conversion_pairs(&db_context, pair1, pair2).await {
+        Ok(pairs) => HttpResponse::Ok().json(ApiResponse::success("Conversion pairs retrieved successfully", pairs)),
+        Err(err) => {
+            error!("Failed to retrieve conversion pairs: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct ConversionPairsQuery {
+    pair1: String,
+    pair2: String,
+}
+
+#[get("/market_pairs/by_exchange/{exchange_id}")]
+pub async fn get_market_pairs_by_exchange(
+    exchange_id: web::Path<String>,
+    db_context: web::Data<MongoDbContext>
+) -> impl Responder {
+    match ObjectId::parse_str(&*exchange_id) {
+        Ok(oid) => {
+            match MarketPairService::get_all_market_pairs_by_exchange(&db_context, oid).await {
+                Ok(market_pairs) => HttpResponse::Ok().json(ApiResponse::success("Market pairs retrieved successfully", market_pairs)),
+                Err(err) => {
+                    error!("Failed to retrieve market pairs by exchange: {}", err);
+                    HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err.to_string()))
+                },
+            }
+        },
+        Err(_) => {
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error("Invalid exchange ID"))
+        }
+    }
+}
+
+#[get("/market_pairs/with_pagination")]
+pub async fn get_all_market_pairs_with_pagination(
+    db_context: web::Data<MongoDbContext>,
+    query: web::Query<MarketPairQuery>,
+) -> impl Responder {
+    let page = query.page.unwrap_or(1);
+    let per_page = query.per_page.unwrap_or(20);
+
+    match MarketPairService::get_all_market_pairs_with_pagination(
+        &db_context,
+        page,
+        per_page,
+        query.exchange_id.clone(),
+        query.search.clone(),
+    ).await {
+        Ok((market_pairs, total)) => HttpResponse::Ok().json(ApiResponse::success("Market pairs retrieved successfully", json!({
+            "market_pairs": market_pairs,
+            "total": total,
+            "page": page,
+            "per_page": per_page
+        }))),
+        Err(err) => {
+            error!("Failed to retrieve market pairs in GET /market_pairs/with_pagination: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+
+#[post("/market_pairs")]
+pub async fn create_market_pair(market_pair: web::Json<MarketPair>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    match MarketPairService::create_market_pair(market_pair.into_inner(), &db_context).await {
+        Ok(market_pair) => HttpResponse::Ok().json(ApiResponse::success("Market pair created successfully", market_pair)),
+        Err(err) => {
+            error!("Failed to create market pair in : {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[get("/market_pairs/{id}")]
+pub async fn get_market_pair(path: web::Path<ObjectIdPath>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match MarketPairService::get_market_pair(id, &db_context).await {
+        Ok(market_pair) => HttpResponse::Ok().json(ApiResponse::success("Market pair retrieved successfully", market_pair)),
+        Err(err) => {
+            error!("Failed to retrieve market pair: {}", err);
+            HttpResponse::NotFound().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[put("/market_pairs/{id}")]
+pub async fn update_market_pair(path: web::Path<ObjectIdPath>, market_pair: web::Json<MarketPair>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match MarketPairService::update_market_pair(id, market_pair.into_inner(), &db_context).await {
+        Ok(market_pair) => HttpResponse::Ok().json(ApiResponse::success("Market pair updated successfully", market_pair)),
+        Err(err) => {
+            error!("Failed to update market pair: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[delete("/market_pairs/{id}")]
+pub async fn delete_market_pair(path: web::Path<ObjectIdPath>, db_context: web::Data<MongoDbContext>) -> impl Responder {
+    let id = ObjectId::parse_str(&path.id).expect("Invalid ObjectId");
+    match MarketPairService::delete_market_pair(id, &db_context).await {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse::success("Market pair deleted successfully", ())),
+        Err(err) => {
+            error!("Failed to delete market pair: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+
+#[get("/market_pairs/conversion_pairs_for_arbitrage")]
+pub async fn get_conversion_pairs_for_arbitrage(
+    query: web::Query<ConversionPairsQueryToArbitrage>,
+    db_context: web::Data<MongoDbContext>
+) -> impl Responder {
+    // Use query.pair1 and query.pair2 here
+    // Don't try to parse these as ObjectIds
+    match MarketPairService::get_conversion_pairs_for_arbitrage(&db_context, &query.pair1, &query.pair2).await {
+        Ok(pairs) => HttpResponse::Ok().json(ApiResponse::success("Conversion pairs for arbitrage retrieved successfully", pairs)),
+        Err(err) => {
+            error!("Failed to retrieve conversion pairs for arbitrage: {}", err);
+            HttpResponse::BadRequest().json(ApiResponse::<String>::error(&err))
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct ConversionPairsQueryToArbitrage {
+    pair1: String,
+    pair2: String,
+}
+
+
+
+
+
+--------------------
+
+
+Ruta: modules/market_pair/market_pair_service.rs
+
+use crate::db::mongodb::MongoDbContext;
+use mongodb::bson::{doc, Document, oid::ObjectId, Regex};
+use crate::modules::market_pair::market_pair_schema::MarketPair;
+use tracing::error;
+use chrono::Utc;
+use futures::TryStreamExt;
+use serde::{Serialize, Deserialize};
+use mongodb::bson;
+
+use crate::modules::asset::asset_schema::Asset;
+use crate::modules::exchange::exchange_schema::Exchange;
+
+pub struct MarketPairService;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PopulatedMarketPair {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub exchange: Exchange,
+    pub base_asset: Asset,
+    pub quote_asset: Asset,
+    pub created_at: f64,
+    pub updated_at: f64,
+    pub status: bool,
+}
+
+
+impl MarketPairService {
+    pub async fn create_market_pair(market_pair: MarketPair, db_context: &MongoDbContext) -> Result<MarketPair, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<MarketPair>("marketpairs");
+
+        let now = Utc::now().timestamp() as f64;
+        let new_market_pair = MarketPair {
+            created_at: now,
+            updated_at: now,
+            ..market_pair 
+        };
+
+        let insert_result = collection.insert_one(new_market_pair.clone()).await
+            .map_err(|e| {
+                error!("Failed to insert market pair: {}", e);
+                e.to_string()
+            })?;
+        
+        let new_market_pair = collection.find_one(doc! { "_id": insert_result.inserted_id }).await
+            .map_err(|e| {
+                error!("Failed to fetch created market pair: {}", e);
+                e.to_string()
+            })?
+            .ok_or_else(|| {
+                let msg = "Failed to fetch created market pair".to_string();
+                error!("{}", msg);
+                msg
+            })?;
+        
+        Ok(new_market_pair)
+    }
+
+    pub async fn get_market_pair(id: ObjectId, db_context: &MongoDbContext) -> Result<MarketPair, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<MarketPair>("marketpairs");
+
+        let market_pair = collection.find_one(doc! { "_id": id }).await
+            .map_err(|e| {
+                error!("Failed to fetch market pair: {}", e);
+                e.to_string()
+            })?
+            .ok_or_else(|| {
+                let msg = "Market pair not found".to_string();
+                error!("{}", msg);
+                msg
+            })?;
+
+        Ok(market_pair)
+    }
+
+    pub async fn update_market_pair(id: ObjectId, updated_market_pair: MarketPair, db_context: &MongoDbContext) -> Result<MarketPair, String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<MarketPair>("marketpairs");
+
+        let now = Utc::now().timestamp() as f64;
+        let update_doc = doc! {
+            "$set": {
+                "_exchange": updated_market_pair._exchange,
+                "_base_asset": updated_market_pair._base_asset,
+                "_quote_asset": updated_market_pair._quote_asset,
+                "updated_at": now,
+                "status": updated_market_pair.status,
+            }
+        };
+
+        collection.update_one(doc! { "_id": id }, update_doc).await
+            .map_err(|e| {
+                error!("Failed to update market pair: {}", e);
+                e.to_string()
+            })?;
+
+        Self::get_market_pair(id, db_context).await
+    }
+
+    pub async fn delete_market_pair(id: ObjectId, db_context: &MongoDbContext) -> Result<(), String> {
+        let db = db_context.get_database();
+        let collection = db.collection::<MarketPair>("marketpairs");
+
+        collection.delete_one(doc! { "_id": id }).await
+            .map_err(|e| {
+                error!("Failed to delete market pair: {}", e);
+                e.to_string()
+            })?;
+
+        Ok(())
+    }
+
+    pub async fn get_all_market_pairs_with_pagination(
+        db_context: &MongoDbContext,
+        page: u64,
+        per_page: u64,
+        exchange_id: Option<String>,
+        search: Option<String>
+    ) -> Result<(Vec<PopulatedMarketPair>, u64), String> {
+        let db = db_context.get_database();
+        let market_pairs_collection = db.collection::<Document>("marketpairs");
+    
+        let skip = (page - 1) * per_page;
+    
+        let mut initial_filter = doc! {};
+    
+        if let Some(exchange) = exchange_id.filter(|s| !s.is_empty()) {
+            if let Ok(oid) = ObjectId::parse_str(&exchange) {
+                initial_filter.insert("_exchange", oid);
+            }
+        }
+    
+        let mut pipeline = vec![
+            doc! { "$match": initial_filter },
+            doc! {
+                "$lookup": {
+                    "from": "exchanges",
+                    "localField": "_exchange",
+                    "foreignField": "_id",
+                    "as": "exchange"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_base_asset",
+                    "foreignField": "_id",
+                    "as": "base_asset"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_quote_asset",
+                    "foreignField": "_id",
+                    "as": "quote_asset"
+                }
+            },
+            doc! { "$unwind": "$exchange" },
+            doc! { "$unwind": "$base_asset" },
+            doc! { "$unwind": "$quote_asset" },
+        ];
+    
+        if let Some(term) = search.filter(|s| !s.is_empty()) {
+            let search_stage = doc! {
+                "$match": {
+                    "$or": [
+                        { "base_asset.short_name": Regex { pattern: format!(".*{}.*", term), options: "i".to_string() } },
+                        { "quote_asset.short_name": Regex { pattern: format!(".*{}.*", term), options: "i".to_string() } }
+                    ]
+                }
+            };
+            pipeline.push(search_stage);
+        }
+    
+        pipeline.push(doc! { "$skip": skip as i64 });
+        pipeline.push(doc! { "$limit": per_page as i64 });
+    
+        let mut cursor = market_pairs_collection.aggregate(pipeline.clone()).await
+            .map_err(|e| {
+                error!("Failed to aggregate market pairs: {}", e);
+                e.to_string()
+            })?;
+    
+        let mut populated_market_pairs = Vec::new();
+        while let Some(result) = cursor.try_next().await.map_err(|e| {
+            error!("Failed to iterate through aggregation results: {}", e);
+            e.to_string()
+        })? {
+            let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+                .map_err(|e| {
+                    error!("Failed to deserialize market pair: {}", e);
+                    e.to_string()
+                })?;
+    
+            populated_market_pairs.push(populated_market_pair);
+        }
+    
+        // Para contar el total, necesitamos quitar las etapas de paginación y agregar un $count
+        pipeline.pop(); // Quitar $limit
+        pipeline.pop(); // Quitar $skip
+        pipeline.push(doc! { "$count": "total" });
+    
+        let total = market_pairs_collection.aggregate(pipeline).await
+            .map_err(|e| {
+                error!("Failed to count market pairs: {}", e);
+                e.to_string()
+            })?
+            .try_next().await
+            .map_err(|e| {
+                error!("Failed to get count result: {}", e);
+                e.to_string()
+            })?
+            .and_then(|doc| doc.get_i64("total").ok())
+            .unwrap_or(0) as u64;
+    
+        Ok((populated_market_pairs, total))
+    }
+    pub async fn get_all_market_pairs_by_exchange(
+        db_context: &MongoDbContext,
+        exchange_id: ObjectId
+    ) -> Result<Vec<PopulatedMarketPair>, String> {
+        let db = db_context.get_database();
+        let market_pairs_collection = db.collection::<Document>("marketpairs");
+    
+        let pipeline = vec![
+            doc! { 
+                "$match": { 
+                    "_exchange": exchange_id 
+                } 
+            },
+            doc! {
+                "$lookup": {
+                    "from": "exchanges",
+                    "localField": "_exchange",
+                    "foreignField": "_id",
+                    "as": "exchange"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_base_asset",
+                    "foreignField": "_id",
+                    "as": "base_asset"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_quote_asset",
+                    "foreignField": "_id",
+                    "as": "quote_asset"
+                }
+            },
+            doc! { "$unwind": "$exchange" },
+            doc! { "$unwind": "$base_asset" },
+            doc! { "$unwind": "$quote_asset" },
+        ];
+    
+        let mut cursor = market_pairs_collection.aggregate(pipeline).await
+            .map_err(|e| {
+                error!("Failed to aggregate market pairs: {}", e);
+                e.to_string()
+            })?;
+    
+        let mut populated_market_pairs = Vec::new();
+        while let Some(result) = cursor.try_next().await.map_err(|e| {
+            error!("Failed to iterate through aggregation results: {}", e);
+            e.to_string()
+        })? {
+            let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+                .map_err(|e| {
+                    error!("Failed to deserialize market pair: {}", e);
+                    e.to_string()
+                })?;
+    
+            populated_market_pairs.push(populated_market_pair);
+        }
+    
+        Ok(populated_market_pairs)
+    }
+    pub async fn get_conversion_pairs(
+        db_context: &MongoDbContext,
+        pair1: ObjectId,
+        pair2: ObjectId
+    ) -> Result<Vec<PopulatedMarketPair>, String> {
+        let db = db_context.get_database();
+        let market_pairs_collection = db.collection::<Document>("marketpairs");
+    
+        // Fetch the assets involved in pair1 and pair2
+        let pair1_doc = market_pairs_collection.find_one(doc! { "_id": pair1 }).await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Pair1 not found".to_string())?;
+        let pair2_doc = market_pairs_collection.find_one(doc! { "_id": pair2 }).await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Pair2 not found".to_string())?;
+    
+        let pair1: MarketPair = bson::from_document(pair1_doc).map_err(|e| e.to_string())?;
+        let pair2: MarketPair = bson::from_document(pair2_doc).map_err(|e| e.to_string())?;
+    
+        let pipeline = vec![
+            doc! {
+                "$match": {
+                    "$or": [
+                        { "_base_asset": pair1._quote_asset, "_quote_asset": pair2._quote_asset },
+                        { "_base_asset": pair2._quote_asset, "_quote_asset": pair1._quote_asset },
+                    ]
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "exchanges",
+                    "localField": "_exchange",
+                    "foreignField": "_id",
+                    "as": "exchange"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_base_asset",
+                    "foreignField": "_id",
+                    "as": "base_asset"
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_quote_asset",
+                    "foreignField": "_id",
+                    "as": "quote_asset"
+                }
+            },
+            doc! { "$unwind": "$exchange" },
+            doc! { "$unwind": "$base_asset" },
+            doc! { "$unwind": "$quote_asset" },
+        ];
+    
+        let mut cursor = market_pairs_collection.aggregate(pipeline).await
+            .map_err(|e| e.to_string())?;
+    
+        let mut populated_market_pairs = Vec::new();
+        while let Some(result) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+                .map_err(|e| e.to_string())?;
+            populated_market_pairs.push(populated_market_pair);
+        }
+    
+        Ok(populated_market_pairs)
+    }
+    // En src/modules/market_pair/market_pair_service.rs
+
+    pub async fn get_conversion_pairs_for_arbitrage(
+        db_context: &MongoDbContext,
+        quote_asset1: &str,
+        quote_asset2: &str
+    ) -> Result<Vec<PopulatedMarketPair>, String> {
+    let db = db_context.get_database();
+    let market_pairs_collection = db.collection::<Document>("marketpairs");
+
+    // Definir los posibles stablecoins y monedas fiat
+    let stablecoins = doc! {
+        "USD": ["USDT", "USDC", "DAI", "TUSD", "USDP", "GUSD", "USD"],
+        "EUR": ["EURS", "EURT", "sEUR", "EURB", "EURe", "cEUR", "EUROC", "EUR"]
+    };
+
+    // Construir la lista de posibles assets para la conversión
+    let mut possible_assets = vec![quote_asset1.to_string(), quote_asset2.to_string()];
+    for (_, coins) in stablecoins {
+        if let bson::Bson::Array(coin_array) = coins {
+            for coin in coin_array.iter() {  // Usar .iter() aquí
+                if coin.as_str().unwrap() == quote_asset1 || coin.as_str().unwrap() == quote_asset2 {
+                    possible_assets.extend(coin_array.iter().map(|c| c.as_str().unwrap().to_string()));
+                    break;
+                }
+            }
+        }
+    }
+
+    // Eliminar duplicados
+    possible_assets.sort();
+    possible_assets.dedup();
+
+    let pipeline = vec![
+        doc! {
+            "$match": {
+                "$or": [
+                    { "base_asset.short_name": { "$in": &possible_assets } },
+                    { "quote_asset.short_name": { "$in": &possible_assets } }
+                ]
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "exchanges",
+                "localField": "_exchange",
+                "foreignField": "_id",
+                "as": "exchange"
+            }
+        },
+        doc! { "$unwind": "$exchange" },
+        doc! {
+            "$project": {
+                "_id": 1,
+                "exchange": 1,
+                "base_asset": 1,
+                "quote_asset": 1,
+                "created_at": 1,
+                "updated_at": 1,
+                "status": 1
+            }
+        }
+    ];
+
+    let mut cursor = market_pairs_collection.aggregate(pipeline).await
+        .map_err(|e| e.to_string())?;
+
+    let mut conversion_pairs = Vec::new();
+    while let Some(result) = cursor.try_next().await.map_err(|e| e.to_string())? {
+        let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+            .map_err(|e| e.to_string())?;
+        conversion_pairs.push(populated_market_pair);
+    }
+
+    Ok(conversion_pairs)
+}
+}
+
+
+--------------------
+
+
+Ruta: modules/market_pair/market_pair_schema.rs
+
+use serde::{Serialize, Deserialize};
+use mongodb::bson::oid::ObjectId;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MarketPair {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub _exchange: ObjectId,
+    pub _base_asset: ObjectId,
+    pub _quote_asset: ObjectId,
+    pub created_at: f64,
+    pub updated_at: f64,
+    pub status: bool,
+}
+
+--------------------
+
+
+Ruta: modules/market_pair/mod.rs
+
+pub mod market_pair_schema;
+pub mod market_pair_service;
+pub mod market_pair_controller;
+
+use actix_web::web;
+
+pub fn init(cfg: &mut web::ServiceConfig) {
+    cfg.service(market_pair_controller::get_conversion_pairs_for_arbitrage);
+    cfg.service(market_pair_controller::get_conversion_pairs);  
+    cfg.service(market_pair_controller::get_market_pairs_by_exchange);
+    cfg.service(market_pair_controller::get_all_market_pairs_with_pagination);      
+    cfg.service(market_pair_controller::create_market_pair);
+    cfg.service(market_pair_controller::get_market_pair);
+    cfg.service(market_pair_controller::update_market_pair);
+    cfg.service(market_pair_controller::delete_market_pair);
+    
+}
+
+
+--------------------
+
+
+Ruta: router.rs
+
+use actix_web::web;
+
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.configure(crate::modules::auth::init);
+    cfg.configure(crate::modules::account::init);
+    cfg.configure(crate::modules::asset::init); // Añadir el módulo de assets
+    cfg.configure(crate::modules::market_pair::init); // Añadir el módulo de market_pair
+    cfg.configure(crate::modules::exchange::init);
+    cfg.configure(crate::modules::arbitrage_strategy::init);
+}
+
+
+--------------------
+
+
+Ruta: middleware/auth_middleware.rs
+
+use actix_web::{dev::ServiceRequest, dev::ServiceResponse, Error, HttpMessage, HttpResponse};
+use actix_web::dev::{Transform, Service};
+use actix_web::http::StatusCode;
+use actix_web::body::EitherBody;
+use futures::future::{ok, Ready as FuturesReady};
+use std::task::{Context, Poll};
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::pin::Pin;
+use std::future::Future;
+use jsonwebtoken::{decode, DecodingKey, Validation};
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
+}
+
+pub struct Auth;
+
+impl<S, B> Transform<S, ServiceRequest> for Auth
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<EitherBody<B>>;
+    type Error = Error;
+    type Transform = AuthMiddleware<S>;
+    type InitError = ();
+    type Future = FuturesReady<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        ok(AuthMiddleware { service: Rc::new(RefCell::new(service)) })
+    }
+}
+
+pub struct AuthMiddleware<S> {
+    service: Rc<RefCell<S>>,
+}
+
+impl<S, B> Service<ServiceRequest> for AuthMiddleware<S>
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    S::Future: 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<EitherBody<B>>;
+    type Error = Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&self, ctx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.service.borrow_mut().poll_ready(ctx)
+    }
+
+    fn call(&self, req: ServiceRequest) -> Self::Future {
+        let svc = self.service.clone();
+
+        Box::pin(async move {
+            // Permitir acceso sin autenticación a /register y /login
+            let path = req.path();
+            if path == "/register" || path == "/login" {
+                return Ok(svc.borrow_mut().call(req).await?.map_into_left_body());
+            }
+
+            // Verificar autenticación para otras rutas
+            if let Some(authen_header) = req.headers().get("Authorization") {
+                if let Ok(authen_str) = authen_header.to_str() {
+                    if authen_str.starts_with("Bearer ") {
+                        let token = authen_str.trim_start_matches("Bearer ").to_string();
+                        let secret_key = std::env::var("SECRET_KEY").expect("SECRET_KEY must be set");
+                        if let Ok(decoded) = decode::<Claims>(&token, &DecodingKey::from_secret(secret_key.as_ref()), &Validation::default()) {
+                            req.extensions_mut().insert(decoded.claims);
+                            return Ok(svc.borrow_mut().call(req).await?.map_into_left_body());
+                        }
+                    }
+                }
+            }
+
+            let (req, _) = req.into_parts();
+            Ok(ServiceResponse::new(
+                req,
+                HttpResponse::new(StatusCode::UNAUTHORIZED).map_into_right_body()
+            ))
+        })
+    }
+}
+
+
+--------------------
+
+
+Ruta: middleware/mod.rs
+
+pub mod auth_middleware;
+
+--------------------
+
+
+Ruta: helpers/mod.rs
+
+
+
+--------------------
+
+
