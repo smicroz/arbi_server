@@ -43,7 +43,7 @@ pub async fn create_arbitrage_strategy(
     
     match ArbitrageStrategyService::create_arbitrage_strategy(parsed_strategy, &db_context).await {
         Ok(created_strategy) => {
-            println!("Strategy created successfully: {:?}", created_strategy);
+            //println!("Strategy created successfully: {:?}", created_strategy);
             HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy created successfully", created_strategy))
         },
         Err(err) => {

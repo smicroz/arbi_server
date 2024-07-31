@@ -72,6 +72,14 @@ use tracing::{error, info};
 use tracing_subscriber;
 use crate::middleware::auth_middleware::Auth;
 
+// Erro not found
+use crate::modules::auth::auth_response::ApiResponse;
+use actix_web::{HttpResponse, Error};
+
+async fn not_found() -> Result<HttpResponse, Error> {
+    Ok(HttpResponse::NotFound().json(ApiResponse::<()>::error("Ruta no encontrada")))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
@@ -99,9 +107,10 @@ async fn main() -> std::io::Result<()> {
     // Iniciar el servidor HTTP de Actix Web
     HttpServer::new(move || {
         App::new()
-            .wrap(Auth) // Añadir el middleware de autenticación
+            //.wrap(Auth) // Añadir el middleware de autenticación
             .app_data(web::Data::new(mongo_context.clone())) // Pasar el contexto de MongoDbContext al contexto de Actix Web
             .configure(router::configure) // Configurar las rutas usando router.rs
+            .default_service(web::route().to(not_found))
     })
     .bind("127.0.0.1:8081")?
     .run()
@@ -1114,7 +1123,7 @@ pub async fn create_arbitrage_strategy(
     
     match ArbitrageStrategyService::create_arbitrage_strategy(parsed_strategy, &db_context).await {
         Ok(created_strategy) => {
-            println!("Strategy created successfully: {:?}", created_strategy);
+            //println!("Strategy created successfully: {:?}", created_strategy);
             HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy created successfully", created_strategy))
         },
         Err(err) => {
@@ -1193,12 +1202,47 @@ pub async fn get_all_arbitrage_strategies(
 Ruta: modules/arbitrage_strategy/arbitrage_strategy_service.rs
 
 use crate::db::mongodb::MongoDbContext;
-use mongodb::bson::{doc, oid::ObjectId};
+use mongodb::bson::{doc, oid::ObjectId, Document};
 use crate::modules::arbitrage_strategy::arbitrage_strategy_schema::{ArbitrageStrategy, ArbitrageType, ArbitrageDetails};
+use crate::modules::market_pair::market_pair_service::PopulatedMarketPair;
 use tracing::error;
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson;
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct PopulatedArbitrageStrategy {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub arbitrage_type: ArbitrageType,
+    pub details: PopulatedArbitrageDetails,
+    pub created_at: f64,
+    pub updated_at: f64,
+    pub status: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub enum PopulatedArbitrageDetails {
+    Geographic {
+        pair1: PopulatedMarketPair,
+        pair2: PopulatedMarketPair,
+        conversion_pair: PopulatedMarketPair,
+    },
+    Exchange {
+        pair1: PopulatedMarketPair,
+        pair2: PopulatedMarketPair,
+    },
+    Triangular {
+        pair1: PopulatedMarketPair,
+        pair2: PopulatedMarketPair,
+        pair3: PopulatedMarketPair,
+    },
+    TradingPair {
+        pair1: PopulatedMarketPair,
+        pair2: PopulatedMarketPair,
+        pair3: PopulatedMarketPair,
+    },
+}
 
 pub struct ArbitrageStrategyService;
 
@@ -1294,45 +1338,183 @@ impl ArbitrageStrategyService {
         Ok(())
     }
 
-    pub async fn get_all_arbitrage_strategies(
-        db_context: &MongoDbContext,
-        page: u64,
-        per_page: u64,
-        arbitrage_type: Option<ArbitrageType>,
-    ) -> Result<(Vec<ArbitrageStrategy>, u64), String> {
-        let db = db_context.get_database();
-        let collection = db.collection::<ArbitrageStrategy>("arbitrage_strategies");
 
-        let skip = (page - 1) * per_page;
-        
-        let mut filter = doc! {};
-        if let Some(arb_type) = arbitrage_type {
-            filter.insert("arbitrage_type", bson::to_bson(&arb_type)
-                .map_err(|e| e.to_string())?);
-        }
 
-        let mut cursor = collection.find(filter.clone()).skip(skip as u64).limit(per_page as i64).await
-            .map_err(|e| {
-                error!("Failed to fetch arbitrage strategies: {}", e);
-                e.to_string()
-            })?;
+pub async fn get_all_arbitrage_strategies(
+    db_context: &MongoDbContext,
+    page: u64,
+    per_page: u64,
+    arbitrage_type: Option<ArbitrageType>,
+) -> Result<(Vec<PopulatedArbitrageStrategy>, u64), String> {
+    let db = db_context.get_database();
+    let collection = db.collection::<Document>("arbitrage_strategies");
 
-        let mut strategies = Vec::new();
-        while let Some(strategy) = cursor.try_next().await.map_err(|e| {
-            error!("Failed to iterate through arbitrage strategies: {}", e);
-            e.to_string()
-        })? {
-            strategies.push(strategy);
-        }
-
-        let total = collection.count_documents(filter).await
-            .map_err(|e| {
-                error!("Failed to count arbitrage strategies: {}", e);
-                e.to_string()
-            })?;
-
-        Ok((strategies, total))
+    let skip = (page - 1) * per_page;
+    
+    let mut filter = doc! {};
+    if let Some(arb_type) = arbitrage_type {
+        filter.insert("arbitrage_type", bson::to_bson(&arb_type)
+            .map_err(|e| e.to_string())?);
     }
+
+    println!("Filter: {:?}", filter);
+
+    let pipeline = vec![
+        doc! { "$match": filter.clone() },
+        doc! { "$skip": skip as i64 },
+        doc! { "$limit": per_page as i64 },
+        doc! {
+            "$lookup": {
+                "from": "marketpairs",
+                "let": { 
+                    "pair1": "$details.Geographic.pair1", 
+                    "pair2": "$details.Geographic.pair2", 
+                    "conversion_pair": "$details.Geographic.conversion_pair"
+                },
+                "pipeline": [
+                    { "$match": 
+                        { "$expr": 
+                            { "$or": [
+                                { "$eq": ["$_id", "$$pair1"] },
+                                { "$eq": ["$_id", "$$pair2"] },
+                                { "$eq": ["$_id", "$$conversion_pair"] }
+                            ]}
+                        }
+                    },
+                    {
+                        "$lookup": {
+                            "from": "exchanges",
+                            "localField": "_exchange",
+                            "foreignField": "_id",
+                            "as": "exchange"
+                        }
+                    },
+                    { "$unwind": "$exchange" },
+                    {
+                        "$lookup": {
+                            "from": "assets",
+                            "localField": "_base_asset",
+                            "foreignField": "_id",
+                            "as": "base_asset"
+                        }
+                    },
+                    { "$unwind": "$base_asset" },
+                    {
+                        "$lookup": {
+                            "from": "assets",
+                            "localField": "_quote_asset",
+                            "foreignField": "_id",
+                            "as": "quote_asset"
+                        }
+                    },
+                    { "$unwind": "$quote_asset" }
+                ],
+                "as": "populated_pairs"
+            }
+        }
+    ];
+
+    println!("Pipeline: {:?}", pipeline);
+
+    let mut cursor = collection.aggregate(pipeline).await
+        .map_err(|e| {
+            error!("Failed to fetch arbitrage strategies: {}", e);
+            e.to_string()
+        })?;
+
+    let mut strategies = Vec::new();
+    while let Some(doc) = cursor.try_next().await.map_err(|e| {
+        error!("Failed to iterate through arbitrage strategies: {}", e);
+        e.to_string()
+    })? {
+        println!("Raw document: {:?}", doc);
+
+        let strategy: ArbitrageStrategy = bson::from_document(doc.clone())
+            .map_err(|e| {
+                error!("Failed to deserialize arbitrage strategy: {}", e);
+                e.to_string()
+            })?;
+
+        println!("Deserialized strategy: {:?}", strategy);
+
+        let populated_pairs: Vec<PopulatedMarketPair> = bson::from_bson(bson::Bson::Array(doc.get_array("populated_pairs").unwrap_or(&Vec::new()).clone()))
+            .map_err(|e| {
+                error!("Failed to deserialize populated pairs: {}", e);
+                e.to_string()
+            })?;
+
+        println!("Populated pairs: {:?}", populated_pairs);
+
+        let populated_details = match &strategy.details {
+            ArbitrageDetails::Geographic(geo) => {
+                let pair1 = populated_pairs.iter().find(|p| p.id == Some(geo.pair1)).cloned();
+                let pair2 = populated_pairs.iter().find(|p| p.id == Some(geo.pair2)).cloned();
+                let conversion_pair = populated_pairs.iter().find(|p| p.id == Some(geo.conversion_pair)).cloned();
+                
+                if let (Some(p1), Some(p2), Some(cp)) = (pair1, pair2, conversion_pair) {
+                    PopulatedArbitrageDetails::Geographic { pair1: p1, pair2: p2, conversion_pair: cp }
+                } else {
+                    println!("Missing pairs for Geographic arbitrage");
+                    continue; // Skip this strategy if we can't populate all pairs
+                }
+            },
+            ArbitrageDetails::Exchange(ex) => {
+                let pair1 = populated_pairs.iter().find(|p| p.id == Some(ex.pair1)).cloned();
+                let pair2 = populated_pairs.iter().find(|p| p.id == Some(ex.pair2)).cloned();
+                
+                if let (Some(p1), Some(p2)) = (pair1, pair2) {
+                    PopulatedArbitrageDetails::Exchange { pair1: p1, pair2: p2 }
+                } else {
+                    continue; // Skip this strategy if we can't populate all pairs
+                }
+            },
+            ArbitrageDetails::Triangular(tri) => {
+                let pair1 = populated_pairs.iter().find(|p| p.id == Some(tri.pair1)).cloned();
+                let pair2 = populated_pairs.iter().find(|p| p.id == Some(tri.pair2)).cloned();
+                let pair3 = populated_pairs.iter().find(|p| p.id == Some(tri.pair3)).cloned();
+                
+                if let (Some(p1), Some(p2), Some(p3)) = (pair1, pair2, pair3) {
+                    PopulatedArbitrageDetails::Triangular { pair1: p1, pair2: p2, pair3: p3 }
+                } else {
+                    continue; // Skip this strategy if we can't populate all pairs
+                }
+            },
+            ArbitrageDetails::TradingPair(tp) => {
+                let pair1 = populated_pairs.iter().find(|p| p.id == Some(tp.pair1)).cloned();
+                let pair2 = populated_pairs.iter().find(|p| p.id == Some(tp.pair2)).cloned();
+                let pair3 = populated_pairs.iter().find(|p| p.id == Some(tp.pair3)).cloned();
+                
+                if let (Some(p1), Some(p2), Some(p3)) = (pair1, pair2, pair3) {
+                    PopulatedArbitrageDetails::TradingPair { pair1: p1, pair2: p2, pair3: p3 }
+                } else {
+                    continue; // Skip this strategy if we can't populate all pairs
+                }
+            },
+        };
+
+        let populated_strategy = PopulatedArbitrageStrategy {
+            id: strategy.id.unwrap(),
+            arbitrage_type: strategy.arbitrage_type,
+            details: populated_details,
+            created_at: strategy.created_at,
+            updated_at: strategy.updated_at,
+            status: strategy.status,
+        };
+
+        strategies.push(populated_strategy);
+    }
+
+    let total = collection.count_documents(filter).await
+        .map_err(|e| {
+            error!("Failed to count arbitrage strategies: {}", e);
+            e.to_string()
+        })?;
+
+    println!("Total strategies: {}", total);
+    println!("Returned strategies: {}", strategies.len());
+
+    Ok((strategies, total))
+}
 }
 
 --------------------
@@ -1594,7 +1776,7 @@ pub async fn get_conversion_pairs_for_arbitrage(
 ) -> impl Responder {
     // Use query.pair1 and query.pair2 here
     // Don't try to parse these as ObjectIds
-    match MarketPairService::get_conversion_pairs_for_arbitrage(&db_context, &query.pair1, &query.pair2).await {
+    match MarketPairService::get_conversion_pairs_for_arbitrage(&db_context, &query.quote_asset1, &query.quote_asset2).await {
         Ok(pairs) => HttpResponse::Ok().json(ApiResponse::success("Conversion pairs for arbitrage retrieved successfully", pairs)),
         Err(err) => {
             error!("Failed to retrieve conversion pairs for arbitrage: {}", err);
@@ -1605,9 +1787,10 @@ pub async fn get_conversion_pairs_for_arbitrage(
 
 #[derive(Deserialize)]
 struct ConversionPairsQueryToArbitrage {
-    pair1: String,
-    pair2: String,
+    quote_asset1: String,
+    quote_asset2: String,
 }
+
 
 
 
@@ -1978,75 +2161,106 @@ impl MarketPairService {
         quote_asset1: &str,
         quote_asset2: &str
     ) -> Result<Vec<PopulatedMarketPair>, String> {
-    let db = db_context.get_database();
-    let market_pairs_collection = db.collection::<Document>("marketpairs");
-
-    // Definir los posibles stablecoins y monedas fiat
-    let stablecoins = doc! {
-        "USD": ["USDT", "USDC", "DAI", "TUSD", "USDP", "GUSD", "USD"],
-        "EUR": ["EURS", "EURT", "sEUR", "EURB", "EURe", "cEUR", "EUROC", "EUR"]
-    };
-
-    // Construir la lista de posibles assets para la conversión
-    let mut possible_assets = vec![quote_asset1.to_string(), quote_asset2.to_string()];
-    for (_, coins) in stablecoins {
-        if let bson::Bson::Array(coin_array) = coins {
-            for coin in coin_array.iter() {  // Usar .iter() aquí
-                if coin.as_str().unwrap() == quote_asset1 || coin.as_str().unwrap() == quote_asset2 {
-                    possible_assets.extend(coin_array.iter().map(|c| c.as_str().unwrap().to_string()));
-                    break;
+        let db = db_context.get_database();
+        let market_pairs_collection = db.collection::<Document>("marketpairs");
+    
+        // Definir los posibles stablecoins y monedas fiat
+        let stablecoins = doc! {
+            "USD": ["USDT", "USDC", "DAI", "TUSD", "USDP", "GUSD", "USD"],
+            "EUR": ["EURS", "EURT", "sEUR", "EURB", "EURe", "cEUR", "EUROC", "EUR"]
+        };
+    
+        // Función para obtener todas las variantes de un asset
+        let get_asset_variants = |asset: &str| -> Vec<String> {
+            let mut variants = vec![asset.to_string()];
+            for (fiat, coins) in stablecoins.iter() {
+                if let bson::Bson::Array(coin_array) = coins {
+                    if coin_array.iter().any(|c| c.as_str().unwrap() == asset) {
+                        variants.push(fiat.to_string());
+                        variants.extend(coin_array.iter().map(|c| c.as_str().unwrap().to_string()));
+                    }
                 }
             }
-        }
-    }
-
-    // Eliminar duplicados
-    possible_assets.sort();
-    possible_assets.dedup();
-
-    let pipeline = vec![
-        doc! {
-            "$match": {
-                "$or": [
-                    { "base_asset.short_name": { "$in": &possible_assets } },
-                    { "quote_asset.short_name": { "$in": &possible_assets } }
-                ]
+            variants.sort();
+            variants.dedup();
+            variants
+        };
+    
+        let asset1_variants = get_asset_variants(quote_asset1);
+        let asset2_variants = get_asset_variants(quote_asset2);    
+   
+        let pipeline = vec![
+            // Lookup para obtener la información del base_asset
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_base_asset",
+                    "foreignField": "_id",
+                    "as": "base_asset"
+                }
+            },
+            doc! { "$unwind": "$base_asset" },
+            // Lookup para obtener la información del quote_asset
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_quote_asset",
+                    "foreignField": "_id",
+                    "as": "quote_asset"
+                }
+            },
+            doc! { "$unwind": "$quote_asset" },
+            // Ahora podemos hacer el match utilizando la información de los assets
+            doc! {
+                "$match": {
+                    "$or": [
+                        { 
+                            "base_asset.short_name": { "$in": &asset1_variants },
+                            "quote_asset.short_name": { "$in": &asset2_variants }
+                        },
+                        { 
+                            "base_asset.short_name": { "$in": &asset2_variants },
+                            "quote_asset.short_name": { "$in": &asset1_variants }
+                        }
+                    ]
+                }
+            },
+            // Lookup para obtener la información del exchange
+            doc! {
+                "$lookup": {
+                    "from": "exchanges",
+                    "localField": "_exchange",
+                    "foreignField": "_id",
+                    "as": "exchange"
+                }
+            },
+            doc! { "$unwind": "$exchange" },
+            // Proyectar los campos necesarios
+            doc! {
+                "$project": {
+                    "_id": 1,
+                    "exchange": 1,
+                    "base_asset": 1,
+                    "quote_asset": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                    "status": 1
+                }
             }
-        },
-        doc! {
-            "$lookup": {
-                "from": "exchanges",
-                "localField": "_exchange",
-                "foreignField": "_id",
-                "as": "exchange"
-            }
-        },
-        doc! { "$unwind": "$exchange" },
-        doc! {
-            "$project": {
-                "_id": 1,
-                "exchange": 1,
-                "base_asset": 1,
-                "quote_asset": 1,
-                "created_at": 1,
-                "updated_at": 1,
-                "status": 1
-            }
-        }
-    ];
-
-    let mut cursor = market_pairs_collection.aggregate(pipeline).await
-        .map_err(|e| e.to_string())?;
-
-    let mut conversion_pairs = Vec::new();
-    while let Some(result) = cursor.try_next().await.map_err(|e| e.to_string())? {
-        let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+        ];
+    
+        let mut cursor = market_pairs_collection.aggregate(pipeline).await
             .map_err(|e| e.to_string())?;
-        conversion_pairs.push(populated_market_pair);
+    
+        let mut conversion_pairs = Vec::new();
+        while let Some(result) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+                .map_err(|e| e.to_string())?;
+            conversion_pairs.push(populated_market_pair);
+        }
+    
+        Ok(conversion_pairs)
     }
-
-    Ok(conversion_pairs)
-}
 }
 
 

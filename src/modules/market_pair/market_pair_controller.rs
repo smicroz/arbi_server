@@ -155,7 +155,7 @@ pub async fn get_conversion_pairs_for_arbitrage(
 ) -> impl Responder {
     // Use query.pair1 and query.pair2 here
     // Don't try to parse these as ObjectIds
-    match MarketPairService::get_conversion_pairs_for_arbitrage(&db_context, &query.pair1, &query.pair2).await {
+    match MarketPairService::get_conversion_pairs_for_arbitrage(&db_context, &query.quote_asset1, &query.quote_asset2).await {
         Ok(pairs) => HttpResponse::Ok().json(ApiResponse::success("Conversion pairs for arbitrage retrieved successfully", pairs)),
         Err(err) => {
             error!("Failed to retrieve conversion pairs for arbitrage: {}", err);
@@ -166,9 +166,10 @@ pub async fn get_conversion_pairs_for_arbitrage(
 
 #[derive(Deserialize)]
 struct ConversionPairsQueryToArbitrage {
-    pair1: String,
-    pair2: String,
+    quote_asset1: String,
+    quote_asset2: String,
 }
+
 
 
 

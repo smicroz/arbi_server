@@ -358,73 +358,104 @@ impl MarketPairService {
         quote_asset1: &str,
         quote_asset2: &str
     ) -> Result<Vec<PopulatedMarketPair>, String> {
-    let db = db_context.get_database();
-    let market_pairs_collection = db.collection::<Document>("marketpairs");
-
-    // Definir los posibles stablecoins y monedas fiat
-    let stablecoins = doc! {
-        "USD": ["USDT", "USDC", "DAI", "TUSD", "USDP", "GUSD", "USD"],
-        "EUR": ["EURS", "EURT", "sEUR", "EURB", "EURe", "cEUR", "EUROC", "EUR"]
-    };
-
-    // Construir la lista de posibles assets para la conversión
-    let mut possible_assets = vec![quote_asset1.to_string(), quote_asset2.to_string()];
-    for (_, coins) in stablecoins {
-        if let bson::Bson::Array(coin_array) = coins {
-            for coin in coin_array.iter() {  // Usar .iter() aquí
-                if coin.as_str().unwrap() == quote_asset1 || coin.as_str().unwrap() == quote_asset2 {
-                    possible_assets.extend(coin_array.iter().map(|c| c.as_str().unwrap().to_string()));
-                    break;
+        let db = db_context.get_database();
+        let market_pairs_collection = db.collection::<Document>("marketpairs");
+    
+        // Definir los posibles stablecoins y monedas fiat
+        let stablecoins = doc! {
+            "USD": ["USDT", "USDC", "DAI", "TUSD", "USDP", "GUSD", "USD"],
+            "EUR": ["EURS", "EURT", "sEUR", "EURB", "EURe", "cEUR", "EUROC", "EUR"]
+        };
+    
+        // Función para obtener todas las variantes de un asset
+        let get_asset_variants = |asset: &str| -> Vec<String> {
+            let mut variants = vec![asset.to_string()];
+            for (fiat, coins) in stablecoins.iter() {
+                if let bson::Bson::Array(coin_array) = coins {
+                    if coin_array.iter().any(|c| c.as_str().unwrap() == asset) {
+                        variants.push(fiat.to_string());
+                        variants.extend(coin_array.iter().map(|c| c.as_str().unwrap().to_string()));
+                    }
                 }
             }
-        }
-    }
-
-    // Eliminar duplicados
-    possible_assets.sort();
-    possible_assets.dedup();
-
-    let pipeline = vec![
-        doc! {
-            "$match": {
-                "$or": [
-                    { "base_asset.short_name": { "$in": &possible_assets } },
-                    { "quote_asset.short_name": { "$in": &possible_assets } }
-                ]
+            variants.sort();
+            variants.dedup();
+            variants
+        };
+    
+        let asset1_variants = get_asset_variants(quote_asset1);
+        let asset2_variants = get_asset_variants(quote_asset2);    
+   
+        let pipeline = vec![
+            // Lookup para obtener la información del base_asset
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_base_asset",
+                    "foreignField": "_id",
+                    "as": "base_asset"
+                }
+            },
+            doc! { "$unwind": "$base_asset" },
+            // Lookup para obtener la información del quote_asset
+            doc! {
+                "$lookup": {
+                    "from": "assets",
+                    "localField": "_quote_asset",
+                    "foreignField": "_id",
+                    "as": "quote_asset"
+                }
+            },
+            doc! { "$unwind": "$quote_asset" },
+            // Ahora podemos hacer el match utilizando la información de los assets
+            doc! {
+                "$match": {
+                    "$or": [
+                        { 
+                            "base_asset.short_name": { "$in": &asset1_variants },
+                            "quote_asset.short_name": { "$in": &asset2_variants }
+                        },
+                        { 
+                            "base_asset.short_name": { "$in": &asset2_variants },
+                            "quote_asset.short_name": { "$in": &asset1_variants }
+                        }
+                    ]
+                }
+            },
+            // Lookup para obtener la información del exchange
+            doc! {
+                "$lookup": {
+                    "from": "exchanges",
+                    "localField": "_exchange",
+                    "foreignField": "_id",
+                    "as": "exchange"
+                }
+            },
+            doc! { "$unwind": "$exchange" },
+            // Proyectar los campos necesarios
+            doc! {
+                "$project": {
+                    "_id": 1,
+                    "exchange": 1,
+                    "base_asset": 1,
+                    "quote_asset": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                    "status": 1
+                }
             }
-        },
-        doc! {
-            "$lookup": {
-                "from": "exchanges",
-                "localField": "_exchange",
-                "foreignField": "_id",
-                "as": "exchange"
-            }
-        },
-        doc! { "$unwind": "$exchange" },
-        doc! {
-            "$project": {
-                "_id": 1,
-                "exchange": 1,
-                "base_asset": 1,
-                "quote_asset": 1,
-                "created_at": 1,
-                "updated_at": 1,
-                "status": 1
-            }
-        }
-    ];
-
-    let mut cursor = market_pairs_collection.aggregate(pipeline).await
-        .map_err(|e| e.to_string())?;
-
-    let mut conversion_pairs = Vec::new();
-    while let Some(result) = cursor.try_next().await.map_err(|e| e.to_string())? {
-        let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+        ];
+    
+        let mut cursor = market_pairs_collection.aggregate(pipeline).await
             .map_err(|e| e.to_string())?;
-        conversion_pairs.push(populated_market_pair);
+    
+        let mut conversion_pairs = Vec::new();
+        while let Some(result) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let populated_market_pair: PopulatedMarketPair = bson::from_document(result)
+                .map_err(|e| e.to_string())?;
+            conversion_pairs.push(populated_market_pair);
+        }
+    
+        Ok(conversion_pairs)
     }
-
-    Ok(conversion_pairs)
-}
 }

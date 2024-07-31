@@ -11,6 +11,14 @@ use tracing::{error, info};
 use tracing_subscriber;
 use crate::middleware::auth_middleware::Auth;
 
+// Erro not found
+use crate::modules::auth::auth_response::ApiResponse;
+use actix_web::{HttpResponse, Error};
+
+async fn not_found() -> Result<HttpResponse, Error> {
+    Ok(HttpResponse::NotFound().json(ApiResponse::<()>::error("Ruta no encontrada")))
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok();
@@ -38,9 +46,10 @@ async fn main() -> std::io::Result<()> {
     // Iniciar el servidor HTTP de Actix Web
     HttpServer::new(move || {
         App::new()
-            .wrap(Auth) // Añadir el middleware de autenticación
+            //.wrap(Auth) // Añadir el middleware de autenticación
             .app_data(web::Data::new(mongo_context.clone())) // Pasar el contexto de MongoDbContext al contexto de Actix Web
             .configure(router::configure) // Configurar las rutas usando router.rs
+            .default_service(web::route().to(not_found))
     })
     .bind("127.0.0.1:8081")?
     .run()
