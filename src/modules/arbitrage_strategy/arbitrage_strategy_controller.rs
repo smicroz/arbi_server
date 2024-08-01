@@ -5,7 +5,7 @@ use crate::modules::arbitrage_strategy::arbitrage_strategy_schema::{ArbitrageStr
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize};
 use crate::modules::auth::auth_response::ApiResponse;
-use tracing::error;
+use tracing::{info, error};
 use serde_json::json;
 
 #[derive(Deserialize)]
@@ -37,13 +37,11 @@ pub async fn create_arbitrage_strategy(
     strategy: web::Json<ArbitrageStrategy>,
     db_context: web::Data<MongoDbContext>
 ) -> impl Responder {
-    println!("Received data: {:?}", strategy);
+    info!("Received data: {:?}", strategy);
 
-    let parsed_strategy = strategy.into_inner();
-    
-    match ArbitrageStrategyService::create_arbitrage_strategy(parsed_strategy, &db_context).await {
+    match ArbitrageStrategyService::create_arbitrage_strategy(strategy.into_inner(), &db_context).await {
         Ok(created_strategy) => {
-            //println!("Strategy created successfully: {:?}", created_strategy);
+            info!("Strategy created successfully: {:?}", created_strategy);
             HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy created successfully", created_strategy))
         },
         Err(err) => {

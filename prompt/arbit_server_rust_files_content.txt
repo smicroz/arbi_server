@@ -1085,7 +1085,7 @@ use crate::modules::arbitrage_strategy::arbitrage_strategy_schema::{ArbitrageStr
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize};
 use crate::modules::auth::auth_response::ApiResponse;
-use tracing::error;
+use tracing::{info, error};
 use serde_json::json;
 
 #[derive(Deserialize)]
@@ -1117,13 +1117,11 @@ pub async fn create_arbitrage_strategy(
     strategy: web::Json<ArbitrageStrategy>,
     db_context: web::Data<MongoDbContext>
 ) -> impl Responder {
-    println!("Received data: {:?}", strategy);
+    info!("Received data: {:?}", strategy);
 
-    let parsed_strategy = strategy.into_inner();
-    
-    match ArbitrageStrategyService::create_arbitrage_strategy(parsed_strategy, &db_context).await {
+    match ArbitrageStrategyService::create_arbitrage_strategy(strategy.into_inner(), &db_context).await {
         Ok(created_strategy) => {
-            //println!("Strategy created successfully: {:?}", created_strategy);
+            info!("Strategy created successfully: {:?}", created_strategy);
             HttpResponse::Ok().json(ApiResponse::success("Arbitrage strategy created successfully", created_strategy))
         },
         Err(err) => {
@@ -1205,10 +1203,10 @@ use crate::db::mongodb::MongoDbContext;
 use mongodb::bson::{doc, oid::ObjectId, Document};
 use crate::modules::arbitrage_strategy::arbitrage_strategy_schema::{ArbitrageStrategy, ArbitrageType, ArbitrageDetails};
 use crate::modules::market_pair::market_pair_service::PopulatedMarketPair;
-use tracing::error;
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson;
+use tracing::{error, info};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct PopulatedArbitrageStrategy {
@@ -1247,6 +1245,10 @@ pub enum PopulatedArbitrageDetails {
 pub struct ArbitrageStrategyService;
 
 impl ArbitrageStrategyService {
+
+
+    
+
     pub async fn create_arbitrage_strategy(mut strategy: ArbitrageStrategy, db_context: &MongoDbContext) -> Result<ArbitrageStrategy, String> {
         let db = db_context.get_database();
         let collection = db.collection::<ArbitrageStrategy>("arbitrage_strategies");
@@ -1255,11 +1257,44 @@ impl ArbitrageStrategyService {
         strategy.created_at = now;
         strategy.updated_at = now;
     
-        // Convertir strings a ObjectId si es necesario
-        if let ArbitrageDetails::Geographic(ref mut geo) = strategy.details {
-            geo.pair1 = ObjectId::parse_str(&geo.pair1.to_string()).map_err(|e| e.to_string())?;
-            geo.pair2 = ObjectId::parse_str(&geo.pair2.to_string()).map_err(|e| e.to_string())?;
-            geo.conversion_pair = ObjectId::parse_str(&geo.conversion_pair.to_string()).map_err(|e| e.to_string())?;
+        // Log the received strategy
+        info!("Received strategy: {:?}", strategy);
+        
+        // Función auxiliar para verificar si un ObjectId es válido
+        fn is_valid_object_id(id: &ObjectId) -> bool {
+            // Un ObjectId siempre debe tener 12 bytes
+            id.bytes().len() == 12 && !id.to_hex().chars().all(|c| c == '0')
+        }
+
+        // Procesar los detalles según el tipo de arbitraje
+        match &mut strategy.details {
+            ArbitrageDetails::Geographic(geo) => {
+                if !is_valid_object_id(&geo.pair1) || !is_valid_object_id(&geo.pair2) || !is_valid_object_id(&geo.conversion_pair) {
+                    return Err("Invalid ObjectId for Geographic arbitrage".to_string());
+                }
+                // Aquí podrías agregar más validaciones específicas para el arbitraje geográfico
+            },
+            ArbitrageDetails::Exchange(ex) => {
+                if !is_valid_object_id(&ex.pair1) || !is_valid_object_id(&ex.pair2) {
+                    return Err("Invalid ObjectId for Exchange arbitrage".to_string());
+                }
+                // Validaciones adicionales para el arbitraje de intercambio
+            },
+            ArbitrageDetails::Triangular(tri) => {
+                if !is_valid_object_id(&tri.pair1) || !is_valid_object_id(&tri.pair2) || !is_valid_object_id(&tri.pair3) {
+                    return Err("Invalid ObjectId for Triangular arbitrage".to_string());
+                }
+                // Validaciones específicas para el arbitraje triangular
+                if tri.pair1 == tri.pair2 || tri.pair2 == tri.pair3 || tri.pair1 == tri.pair3 {
+                    return Err("All pairs must be different for Triangular arbitrage".to_string());
+                }
+            },
+            ArbitrageDetails::TradingPair(tp) => {
+                if !is_valid_object_id(&tp.pair1) || !is_valid_object_id(&tp.pair2) || !is_valid_object_id(&tp.pair3) {
+                    return Err("Invalid ObjectId for Trading Pair arbitrage".to_string());
+                }
+                // Validaciones adicionales para el arbitraje de pares de trading
+            },
         }
     
         let insert_result = collection.insert_one(strategy.clone()).await
@@ -1268,7 +1303,9 @@ impl ArbitrageStrategyService {
                 e.to_string()
             })?;
         
-        let new_strategy = collection.find_one(doc! { "_id": insert_result.inserted_id }).await
+        info!("Insert result: {:?}", insert_result);
+    
+        let created_strategy = collection.find_one(doc! { "_id": insert_result.inserted_id }).await
             .map_err(|e| {
                 error!("Failed to fetch created arbitrage strategy: {}", e);
                 e.to_string()
@@ -1279,8 +1316,11 @@ impl ArbitrageStrategyService {
                 msg
             })?;
         
-        Ok(new_strategy)
+        info!("Created strategy: {:?}", created_strategy);
+    
+        Ok(created_strategy)
     }
+
 
     pub async fn get_arbitrage_strategy(id: ObjectId, db_context: &MongoDbContext) -> Result<ArbitrageStrategy, String> {
         let db = db_context.get_database();
@@ -1357,7 +1397,7 @@ pub async fn get_all_arbitrage_strategies(
             .map_err(|e| e.to_string())?);
     }
 
-    println!("Filter: {:?}", filter);
+    // println!("Filter: {:?}", filter);
 
     let pipeline = vec![
         doc! { "$match": filter.clone() },
@@ -1414,7 +1454,7 @@ pub async fn get_all_arbitrage_strategies(
         }
     ];
 
-    println!("Pipeline: {:?}", pipeline);
+    // println!("Pipeline: {:?}", pipeline);
 
     let mut cursor = collection.aggregate(pipeline).await
         .map_err(|e| {
@@ -1427,7 +1467,7 @@ pub async fn get_all_arbitrage_strategies(
         error!("Failed to iterate through arbitrage strategies: {}", e);
         e.to_string()
     })? {
-        println!("Raw document: {:?}", doc);
+        // println!("Raw document: {:?}", doc);
 
         let strategy: ArbitrageStrategy = bson::from_document(doc.clone())
             .map_err(|e| {
@@ -1435,7 +1475,7 @@ pub async fn get_all_arbitrage_strategies(
                 e.to_string()
             })?;
 
-        println!("Deserialized strategy: {:?}", strategy);
+        // println!("Deserialized strategy: {:?}", strategy);
 
         let populated_pairs: Vec<PopulatedMarketPair> = bson::from_bson(bson::Bson::Array(doc.get_array("populated_pairs").unwrap_or(&Vec::new()).clone()))
             .map_err(|e| {
@@ -1443,7 +1483,7 @@ pub async fn get_all_arbitrage_strategies(
                 e.to_string()
             })?;
 
-        println!("Populated pairs: {:?}", populated_pairs);
+        // println!("Populated pairs: {:?}", populated_pairs);
 
         let populated_details = match &strategy.details {
             ArbitrageDetails::Geographic(geo) => {
@@ -1454,7 +1494,7 @@ pub async fn get_all_arbitrage_strategies(
                 if let (Some(p1), Some(p2), Some(cp)) = (pair1, pair2, conversion_pair) {
                     PopulatedArbitrageDetails::Geographic { pair1: p1, pair2: p2, conversion_pair: cp }
                 } else {
-                    println!("Missing pairs for Geographic arbitrage");
+                    // println!("Missing pairs for Geographic arbitrage");
                     continue; // Skip this strategy if we can't populate all pairs
                 }
             },
@@ -1510,8 +1550,8 @@ pub async fn get_all_arbitrage_strategies(
             e.to_string()
         })?;
 
-    println!("Total strategies: {}", total);
-    println!("Returned strategies: {}", strategies.len());
+    // println!("Total strategies: {}", total);
+    // println!("Returned strategies: {}", strategies.len());
 
     Ok((strategies, total))
 }
